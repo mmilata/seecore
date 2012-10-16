@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <inttypes.h>
 
 #include <libelf.h>
 #include <elfutils/libdwfl.h>
@@ -9,7 +10,9 @@
 
 #include "seecore.h"
 
-char *use_userdata_really = NULL;
+/* Is there any other way we can pass the executable file name to the find_elf
+ * callback? */
+char *executable_file = NULL;
 
 void errors(void)
 {
@@ -45,11 +48,11 @@ int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_A
     if (!strcmp("[exe]", modname))
     {
         //printf("[exe] module\n");
-        int fd = open(use_userdata_really, O_RDONLY);
+        int fd = open(executable_file, O_RDONLY);
         if (fd < 0)
             return -1;
 
-        *file_name = realpath(use_userdata_really, NULL);
+        *file_name = realpath(executable_file, NULL);
         *elfp = elf_begin(fd, ELF_C_READ, NULL);
         ret = fd;
     }
@@ -262,10 +265,10 @@ int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Ad
     bool have_dwarf = (dwfl_module_getdwarf (mod, &bias) != NULL);
     errors();
 
+#if 0
     Dwarf_Addr start, end, dwbias, symbias;
     const char *mainfile, *debugfile;
     dwfl_module_info(mod, NULL, &start, &end, NULL, NULL, &mainfile, &debugfile);
-#if 0
     printf("%s 0x%lx+%lx\n", name, start, end-start);
     printf("\tmain: %s, debug: %s\n", /*dwbias, symbias,*/ mainfile, debugfile);
     printf("\telf: %d, dwarf: %d\n", have_elf, have_dwarf);
@@ -283,6 +286,49 @@ int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Ad
     }
 
     return DWARF_CB_OK;
+}
+
+void read_maps(Elf *e, struct core_contents* core)
+{
+    int res;
+    size_t i, nheaders;
+    GElf_Phdr phdr, *p;
+    struct mem_map **nextmm = &(core->maps);
+
+    res = elf_getphdrnum(e, &nheaders);
+    fail_if(res != 0, "elf_getphdrnum");
+
+    for (i = 0; i < nheaders; i++)
+    {
+        p = gelf_getphdr(e, i, &phdr);
+        fail_if(p != &phdr, "gelf_getphdr");
+
+        if (phdr.p_type != PT_LOAD)
+            continue;
+
+        /* segment has to be readable */
+        if ((phdr.p_flags & PF_R) == 0)
+            continue;
+
+        /* assume writable for now */
+        if ((phdr.p_flags & PF_W) == 0)
+            continue;
+
+        /* not executable */
+        if ((phdr.p_flags & PF_X) != 0)
+            continue;
+
+        /* skip incomplete segments */
+        if (phdr.p_filesz != phdr.p_memsz)
+            continue;
+
+        *nextmm = xalloc(sizeof(struct mem_map));
+        (*nextmm)->vaddr = (uint64_t)phdr.p_vaddr;
+        (*nextmm)->off   = (uint64_t)phdr.p_offset;
+        (*nextmm)->len   = (uint64_t)phdr.p_memsz;
+        nextmm = &((*nextmm)->next);
+        //printf("0x%lx+%lx at offset 0x%lx\n", (unsigned long)phdr.p_vaddr, (unsigned long)phdr.p_memsz, (unsigned long)phdr.p_offset);
+    }
 }
 
 struct core_contents* analyze_core(char *exe_file, char *core_file)
@@ -304,12 +350,12 @@ struct core_contents* analyze_core(char *exe_file, char *core_file)
         fail("open");
 
     Elf *e = elf_begin(fd, ELF_C_READ, NULL);
-    if (e == NULL)
-        fail("elf_begin");
+    fail_if(e == NULL, "elf_begin");
+    fail_if(elf_kind(e) != ELF_K_ELF, "elf_kind");
 
     Dwfl *dwfl = dwfl_begin(&dwcb);
 
-    use_userdata_really = exe_file;
+    executable_file = exe_file;
     /*
     if (!dwfl_report_offline(dwfl, "[exe]", exe_file, -1))
         fail("dwfl_report_offline");
@@ -323,8 +369,12 @@ struct core_contents* analyze_core(char *exe_file, char *core_file)
 
     ptrdiff_t ret;
     ret = dwfl_getmodules(dwfl, analyze_module, core, 0);
-    if (ret != 0)
-        fail("dwfl_getmodules returned %td", ret);
+    fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
+
+    read_maps(e, core);
+
+    /* TODO: stacks */
+    /* TODO: location/value extraction */
 
     return core;
 }
@@ -332,6 +382,7 @@ struct core_contents* analyze_core(char *exe_file, char *core_file)
 void print_core(struct core_contents *core)
 {
     struct variable *v;
+    struct mem_map *m;
 
     printf("GLOBALS:\n");
     for (v = core->globals; v != NULL; v = v->next)
@@ -340,6 +391,13 @@ void print_core(struct core_contents *core)
                v->name,
                strrchr(v->location.file, '/')+1,
                v->location.line);
+    }
+
+    printf("\nMEMORY MAPPING: (vaddr -> offset (size))\n");
+    for (m = core->maps; m != NULL; m = m->next)
+    {
+        printf("\t0x%" PRIx64 " -> 0x%" PRIx64 " (%" PRIu64 "B)\n",
+               m->vaddr, m->off, m->len);
     }
 }
 

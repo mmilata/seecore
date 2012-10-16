@@ -30,11 +30,20 @@ struct thread
     struct thread* next;
 };
 
+struct mem_map
+{
+    uint64_t        vaddr; /* starting memory addr */
+    uint64_t        off;   /* offset in coredump */
+    uint64_t        len;   /* length */
+    struct mem_map* next;
+};
+
 struct core_contents
 {
     /* address -> core maps */
     struct variable* globals;
     struct thread*   threads;
+    struct mem_map*  maps;
 };
 
 void fail(const char *fmt, ...);
