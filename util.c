@@ -35,16 +35,14 @@ void fail_if(int p, const char *fmt, ...)
 char* xstrdup(const char *s)
 {
     char *d = strdup(s);
-    if (!d)
-        fail("strdup");
+    fail_if(!d, "strdup");
     return d;
 }
 
 void* xalloc(size_t size)
 {
     void *p = calloc(1, size);
-    if (!p)
-        fail("calloc");
+    fail_if(!p, "calloc");
     return p;
 }
 

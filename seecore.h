@@ -10,18 +10,18 @@ struct variable
     char*            name;
     unsigned         width;
     char*            value;
-    struct location  location;
+    struct location  loc;
     struct variable* next;
 };
 
 struct frame
 {
-    /* address */
-    /* function symbol + location */
-    /* offset */
-    /* variables */
-    /* next */
-    struct frame* next;
+    /* TODO: address / line */
+    char*            name;
+    struct location  loc;
+    struct variable* vars;
+    struct variable* vars_tail; /* O(1) list append */
+    struct frame*    next;
 };
 
 struct thread
@@ -30,6 +30,7 @@ struct thread
     struct thread* next;
 };
 
+/* TODO: rename to data_map */
 struct mem_map
 {
     uint64_t        vaddr; /* starting memory addr */
@@ -42,9 +43,36 @@ struct core_contents
 {
     /* address -> core maps */
     struct variable* globals;
+    struct variable* globals_tail;
     struct thread*   threads;
     struct mem_map*  maps;
 };
+
+struct exe_map
+{
+    uint64_t        vaddr;
+    char*           file;
+    struct exe_map* next;
+};
+
+/* item itself can be a list, i.e. the macro also does concatenation */
+/* TODO: reconsider and eventually remove this ^ capability */
+#define list_append(head,tail,item)          \
+    do{                                      \
+        void *_tmp = (item);                 \
+        if ((_tmp) == NULL)                  \
+            break;                           \
+        if ((head) == NULL)                  \
+        {                                    \
+            (head) = (tail) = (_tmp);        \
+        }                                    \
+        else                                 \
+        {                                    \
+            (tail)->next = (_tmp);           \
+            while ((tail)->next)             \
+                (tail) = (tail)->next;       \
+        }                                    \
+    } while(0)
 
 void fail(const char *fmt, ...);
 void fail_if(int p, const char *fmt, ...);

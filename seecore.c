@@ -8,11 +8,13 @@
 #include <elfutils/libdwfl.h>
 #include <dwarf.h>
 
+#include <libunwind-coredump.h>
+
 #include "seecore.h"
 
 /* Is there any other way we can pass the executable file name to the find_elf
  * callback? */
-char *executable_file = NULL;
+const char *executable_file = NULL;
 
 void errors(void)
 {
@@ -21,33 +23,12 @@ void errors(void)
     //printf("dwarf: [%d]%s dwfl: [%d]%s\n", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
 }
 
-void append_variable(struct variable** list, struct variable* var)
-{
-    if (*list == NULL)
-    {
-        *list = var;
-    }
-    else
-    {
-        append_variable(&(*list)->next, var);
-    }
-}
-
 int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_Addr base, char **file_name, Elf **elfp)
 {
-    int ret;
-    const char *dmodname, *elf, *debug;
-    dmodname = dwfl_module_info(mod, NULL, NULL, NULL, NULL, NULL, &elf, &debug);
-
-    /*
-    printf("<\n\tTrying to find elf:\n");
-    printf("\tModule:\t%s (%s,%s)\n", dmodname, elf, debug);
-    printf("\tModname:\t%s, base: %ld\n", modname, base);
-    */
+    int ret = -1;
 
     if (!strcmp("[exe]", modname))
     {
-        //printf("[exe] module\n");
         int fd = open(executable_file, O_RDONLY);
         if (fd < 0)
             return -1;
@@ -61,71 +42,8 @@ int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_A
         ret = dwfl_build_id_find_elf(mod, userdata, modname, base, file_name, elfp);
     }
 
-    /*
-    printf("\treturning: %d\n", ret);
-    printf(">\n");
-    */
     return ret;
 }
-
-int my_find_debuginfo (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_Addr base,
-                       const char *file_name, const char *debuglink_file,
-                       GElf_Word debuglink_crc, char **debuginfo_file_name)
-{
-    const char *dmodname, *elf, *debug;
-    dmodname = dwfl_module_info(mod, NULL, NULL, NULL, NULL, NULL, &elf, &debug);
-
-    /*
-    printf("<\n\tTrying to find debuginfo:\n");
-    printf("\tModule:\t%s (%s,%s)\n", dmodname, elf, debug);
-    printf("\tModname:\t%s, base: %ld\n", modname, base);
-    printf("\tFilename:\t%s, debuglink: %s\n", file_name, debuglink_file);
-    */
-
-    int ret = dwfl_build_id_find_debuginfo(mod, userdata, modname, base, file_name, debuglink_file, debuglink_crc, debuginfo_file_name);
-    /*
-    printf("\treturning: %d\n", ret);
-    printf(">\n");
-    */
-    return ret;
-}
-
-#if 0
-int print_attr(Dwarf_Attribute *at, void *data)
-{
-    unsigned indent = (unsigned)data;
-    //printf("\tcode: %x\tform: %x\tstring: %s\n", dwarf_whatattr(at), dwarf_whatform(at), dwarf_formstring(at));
-    unsigned int what = dwarf_whatattr(at);
-
-    if (what == DW_AT_name)
-    {
-        for (; indent > 0; indent--)
-            printf("\t");
-        printf("name: %s\n", dwarf_formstring(at));
-    }
-    else if (what == DW_AT_location)
-    {
-        for (; indent > 0; indent--)
-            printf("\t");
-        Dwarf_Block block;
-        printf("location: (form: %x)", dwarf_whatform(at));
-
-        dwarf_formblock(at, &block);
-        printf(" len: %lx", block.length);
-        printf("\n");
-    }
-
-    return DWARF_CB_OK;
-}
-
-int print_die(Dwarf_Die *die)
-{
-    printf("\ttag: 0x%x\n", dwarf_tag(die));
-    dwarf_getattrs(die, print_attr, (void *)2, 0);
-
-    return 0;
-}
-#endif
 
 /* now i remember why i hate c */
 struct cb_var_attrs_arg
@@ -141,22 +59,21 @@ static int cb_var_attrs(Dwarf_Attribute *at, void *arg)
     bool flag;
     Dwarf_Word w;
 
-    //printf("%x\n", dwarf_whatattr(at));
     switch (dwarf_whatattr(at))
     {
     case DW_AT_name:
         a->var->name = xstrdup(dwarf_formstring(at));
-        //printf("name: %s\n", var->name);
+        //printf("name: %s\n", a->var->name);
         break;
     case DW_AT_decl_file:
         ret = dwarf_formudata(at, &w);
         fail_if(ret == -1, "dwarf_formudata");
-        a->var->location.file = xstrdup(dwarf_filesrc(a->files, (size_t)w, NULL, NULL));
+        a->var->loc.file = xstrdup(dwarf_filesrc(a->files, (size_t)w, NULL, NULL));
         break;
     case DW_AT_decl_line:
         ret = dwarf_formudata(at, &w);
         fail_if(ret == -1, "dwarf_formudata");
-        a->var->location.line = (unsigned)w;
+        a->var->loc.line = (unsigned)w;
         break;
     case DW_AT_location:
         /* TODO */
@@ -196,63 +113,79 @@ struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
     return arg.var;
 }
 
-int cu_globals(Dwarf_Die *cu, struct core_contents *core)
+struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files)
 {
-#if 0
-    int cb_cu_name(Dwarf_Attribute *at, void *arg)
-    {
-        char **out = arg;
+    int ret;
+    Dwarf_Die die;
+    struct variable *var, *head = NULL, *tail = NULL;
 
-        if (dwarf_whatattr(at) == DW_AT_name)
+    ret = dwarf_child(parent, &die);
+    if (ret != 0)
+        return NULL;
+
+    do
+    {
+        if (dwarf_tag(&die) == DW_TAG_variable)
         {
-            *out = xstrdup(dwarf_formstring(at));
-            return DWARF_CB_ABORT;
+            var = analyze_variable(&die, files);
+            if (!var)
+                continue;
+
+            /* XXX */
+            if (var->name && var->name[0] == '_')
+            {
+                free(var);
+                continue;
+            }
+
+            list_append(head, tail, var);
         }
-        return DWARF_CB_OK;
+    } while (dwarf_siblingof(&die, &die) == 0);
+
+    return head;
+}
+
+struct variable* cu_globals(Dwarf_Die *cu)
+{
+    int ret;
+    Dwarf_Files *files;
+    Dwarf_Attribute at;
+    Dwarf_Word lang;
+
+    if (dwarf_attr(cu, DW_AT_language, &at) == NULL)
+    {
+        fprintf(stderr, "CU %s: unknown language\n",
+                dwarf_diename(cu));
+        return NULL;
     }
 
-    /* cu file not actually used? */
-    char *cu_file = NULL;
-    ret = dwarf_getattrs(cu, cb_cu_name, &cu_file, 0);
-    if (ret == -1)
-        fail("dwarf_getattrs");
-    printf("CU FILE: %s\n", cu_file);
-#endif
+    ret = dwarf_formudata(&at, &lang);
+    fail_if(ret == -1, "dwarf_formudata");
 
-    int ret;
-    struct variable *var;
-    Dwarf_Die die;
-    Dwarf_Files *files;
+    switch (lang)
+    {
+    case DW_LANG_C89:
+    case DW_LANG_C:
+    case DW_LANG_C99:
+        /* supported language */
+        break;
+    case DW_LANG_C_plus_plus:
+        fail("C++ not supported");
+        /* TODO: return NULL instead */
+        break;
+    default:
+        /*
+        fprintf(stderr, "CU %s: unsupported language: 0x%lx\n",
+                dwarf_diename(cu), (unsigned long)lang);
+        */
+        return NULL;
+        break;
+    }
 
     ret = dwarf_getsrcfiles(cu, &files, NULL);
     fail_if(ret == -1, "dwarf_getsrcfiles");
 
-    ret = dwarf_child(cu, &die);
-    if (ret == 0)
-    {
-        do
-        {
-            if (dwarf_tag(&die) == DW_TAG_variable)
-            {
-                //print_die(&die);
-                var = analyze_variable(&die, files);
-                if (!var)
-                    continue;
-
-                /* XXX */
-                if (var->name && var->name[0] == '_')
-                {
-                    free(var);
-                    continue;
-                }
-
-                /* XXX append */
-                append_variable(&core->globals, var);
-            }
-        } while (dwarf_siblingof(&die, &die) == 0);
-    }
-
-    return 0;
+    return child_variables(cu, files);
 }
 
 int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start_addr, void *arg)
@@ -282,7 +215,8 @@ int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Ad
 
     while ((die = dwfl_module_nextcu(mod, die, &cubias)))
     {
-        cu_globals(die, core/*, cubias*/);
+        /* TODO: sometimes, CU is analyzed multiple times - investigate */
+        list_append(core->globals, core->globals_tail, cu_globals(die));
     }
 
     return DWARF_CB_OK;
@@ -322,20 +256,221 @@ void read_maps(Elf *e, struct core_contents* core)
         if (phdr.p_filesz != phdr.p_memsz)
             continue;
 
+        /* append to list */
         *nextmm = xalloc(sizeof(struct mem_map));
         (*nextmm)->vaddr = (uint64_t)phdr.p_vaddr;
         (*nextmm)->off   = (uint64_t)phdr.p_offset;
         (*nextmm)->len   = (uint64_t)phdr.p_memsz;
         nextmm = &((*nextmm)->next);
-        //printf("0x%lx+%lx at offset 0x%lx\n", (unsigned long)phdr.p_vaddr, (unsigned long)phdr.p_memsz, (unsigned long)phdr.p_offset);
     }
 }
 
-struct core_contents* analyze_core(char *exe_file, char *core_file)
+static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start_addr, void *arg)
+{
+    /* pointer madness! */
+    struct exe_map ***tailp = arg;
+    const char *elf_file = NULL;
+    Dwarf_Addr base;
+
+    dwfl_module_info(mod, NULL, &base, NULL, NULL, NULL, &elf_file, NULL);
+
+    if (elf_file)
+    {
+        **tailp = xalloc(sizeof(struct exe_map));
+        (**tailp)->vaddr = (uint64_t)base;
+        (**tailp)->file = xstrdup(elf_file);
+        *tailp = &((**tailp)->next);
+    }
+
+    return DWARF_CB_OK;
+}
+
+/* This HAS TO be called AFTER dwfl_getmodules(..., analyze_module, ...) as the
+ * file names are resolved lazily and may not be available (or call
+ * dwfl_module_getelf). */
+struct exe_map* executable_maps(Dwfl *dwfl)
+{
+    ptrdiff_t ret;
+    struct exe_map *head = NULL;
+    struct exe_map **tail = &head;
+
+    ret = dwfl_getmodules(dwfl, cb_exe_maps, &tail, 0);
+    fail_if(ret == -1, "dwfl_getmodules");
+
+    return head;
+}
+
+/* TODO: factor out common code from variable attrs callback */
+/* this vvv is UGLY */
+struct cb_subprogram_attrs_arg
+{
+    struct frame *frame;
+    Dwarf_Files *files;
+};
+
+static int cb_subprogram_attrs(Dwarf_Attribute *at, void *arg)
+{
+    struct cb_subprogram_attrs_arg *a = arg;
+    int ret;
+    bool flag;
+    Dwarf_Word w;
+
+    switch (dwarf_whatattr(at))
+    {
+    case DW_AT_name:
+        a->frame->name = xstrdup(dwarf_formstring(at));
+        break;
+    case DW_AT_decl_file:
+        ret = dwarf_formudata(at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        a->frame->loc.file = xstrdup(dwarf_filesrc(a->files, (size_t)w, NULL, NULL));
+        break;
+    case DW_AT_decl_line:
+        ret = dwarf_formudata(at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        a->frame->loc.line = (unsigned)w;
+        break;
+    default:
+        break;
+    }
+
+    return DWARF_CB_OK;
+}
+
+struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui, int thread_no, struct core_contents *core)
+{
+    printf("Thread %d:\n", thread_no);
+
+    int ret;
+    unw_cursor_t c;
+
+    _UCD_select_thread(ui, thread_no);
+
+    ret = unw_init_remote(&c, as, ui);
+    fail_if(ret < 0, "unw_init_remote");
+
+    struct frame *head = NULL, *tail = NULL;
+
+    /* infinite loop insurance */
+    int count = 1000;
+    while (--count > 0)
+    {
+        unw_word_t ip;
+        ret = unw_get_reg(&c, UNW_REG_IP, &ip);
+        fail_if(ret < 0, "unw_get_reg");
+
+        if (ip == 0)
+            break;
+
+        struct frame *frame = xalloc(sizeof(struct frame));
+        list_append(head, tail, frame);
+        /* TODO: frame IP */
+
+        printf("\t%lx\n", (unsigned long)ip);
+        unw_word_t off;
+        char funcname[10*1024];
+        ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
+        printf("\t\t%s\n", funcname);
+        fail_if(ret < 0, "unw_get_proc_name");
+
+        /* find compilation unit owning the IP */
+        Dwarf_Addr bias;
+        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &bias);
+        if (!cu)
+        {
+            printf("\t\tcannot find CU for ip %lx\n", (unsigned long)ip);
+            goto next;
+        }
+
+        /* TODO: we have CU - fall back to CU name if subprogram not found */
+
+        Dwarf_Die *scopes;
+        int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
+        //fail_if(ret == -1, "dwarf_getscopes");
+        if (nscopes == -1)
+        {
+            printf("\t\tfailed to get scopes\n");
+            goto next;
+        }
+
+        Dwarf_Files *files;
+        ret = dwarf_getsrcfiles(cu, &files, NULL);
+        fail_if(ret == -1, "dwarf_getsrcfiles");
+
+        int i;
+        for (i = 0; i < nscopes; i++)
+        {
+            Dwarf_Die *scope_die = &scopes[i];
+            //printf("\t\t\tscope tag %x\n", dwarf_tag(&scopes[i]));
+
+            //append to frame variables
+            list_append(frame->vars, frame->vars_tail, /* TODO: get rid of tail? */
+                        child_variables(scope_die, files));
+
+            if (dwarf_tag(scope_die) == DW_TAG_subprogram)
+            {
+                /* add function name to frame struct */
+                struct cb_subprogram_attrs_arg arg;
+                arg.frame = frame;
+                arg.files = files;
+                dwarf_getattrs(scope_die, cb_subprogram_attrs, &arg, 0);
+                printf("\t\tfunction: %s\n", frame->name);
+
+                /* do not continue over subprogram boundary */
+                break;
+            }
+        }
+
+        //??? free(scopes);
+
+next:
+        ret = unw_step(&c);
+        fail_if(ret < 0, "unw_step");
+
+        if (ret == 0)
+            break;
+    }
+
+    return head;
+}
+
+struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file, struct core_contents *core, struct exe_map *em)
+{
+    unw_addr_space_t as;
+    struct UCD_info *ui;
+    struct thread *head = NULL, *tail = NULL;
+
+    as = unw_create_addr_space(&_UCD_accessors, 0);
+    fail_if(!as, "unw_create_addr_space");
+
+    ui = _UCD_create(core_file);
+    fail_if(!ui, "_UCD_create");
+
+    for (; em != NULL; em = em->next)
+    {
+        if (_UCD_add_backing_file_at_vaddr(ui, em->vaddr, em->file) < 0)
+        {
+            fail("_UCD_add_backing_file_at_vaddr");
+        }
+    }
+
+    int tnum;
+    int nthreads = _UCD_get_num_threads(ui);
+    for (tnum = 0; tnum < nthreads; tnum++)
+    {
+        struct thread *thread = xalloc(sizeof(struct thread));
+        thread->frames = unwind_thread(dwfl, as, ui, tnum, core);
+        list_append(head, tail, thread);
+    }
+
+    return head;
+}
+
+struct core_contents* analyze_core(const char *exe_file, const char *core_file)
 {
     Dwfl_Callbacks dwcb = {
         .find_elf = my_find_elf, //dwfl_build_id_find_elf,
-        .find_debuginfo = my_find_debuginfo, //dwfl_build_id_find_debuginfo,
+        .find_debuginfo = dwfl_build_id_find_debuginfo,
         .section_address = dwfl_offline_section_address
     };
 
@@ -356,10 +491,6 @@ struct core_contents* analyze_core(char *exe_file, char *core_file)
     Dwfl *dwfl = dwfl_begin(&dwcb);
 
     executable_file = exe_file;
-    /*
-    if (!dwfl_report_offline(dwfl, "[exe]", exe_file, -1))
-        fail("dwfl_report_offline");
-        */
 
     if (dwfl_core_file_report(dwfl, e) == -1)
         fail("dwfl_core_file_report");
@@ -374,6 +505,8 @@ struct core_contents* analyze_core(char *exe_file, char *core_file)
     read_maps(e, core);
 
     /* TODO: stacks */
+    core->threads = unwind_stacks(dwfl, core_file, core, executable_maps(dwfl));
+
     /* TODO: location/value extraction */
 
     return core;
@@ -383,21 +516,42 @@ void print_core(struct core_contents *core)
 {
     struct variable *v;
     struct mem_map *m;
+    struct thread *t;
+    struct frame *f;
 
     printf("GLOBALS:\n");
     for (v = core->globals; v != NULL; v = v->next)
     {
         printf("\t%s (%s:%u)\n",
                v->name,
-               strrchr(v->location.file, '/')+1,
-               v->location.line);
+               strrchr(v->loc.file, '/')+1,
+               v->loc.line);
     }
 
     printf("\nMEMORY MAPPING: (vaddr -> offset (size))\n");
     for (m = core->maps; m != NULL; m = m->next)
     {
-        printf("\t0x%" PRIx64 " -> 0x%" PRIx64 " (%" PRIu64 "B)\n",
+        printf("\t0x%"PRIx64" -> 0x%"PRIx64" (%"PRIu64"B)\n",
                m->vaddr, m->off, m->len);
+    }
+
+    printf("\nTHREADS:\n");
+    int tn;
+    for (t = core->threads, tn = 0; t != NULL; t = t->next, tn++)
+    {
+        printf("\tThread %d\n", tn);
+        for (f = t->frames; f != NULL; f = f->next)
+        {
+            printf("\tFrame %s (%s:%u)\n", f->name, f->loc.file, f->loc.line);
+            for (v = f->vars; v != NULL; v = v->next)
+            {
+                printf("\t\t%s (%s:%u)\n",
+                       v->name,
+                       strrchr(v->loc.file, '/')+1,
+                       v->loc.line);
+            }
+        }
+        printf("\n");
     }
 }
 
