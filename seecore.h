@@ -5,11 +5,17 @@ struct location
     /* column ? */
 };
 
+struct type
+{
+    char*    name;  /* useless for anything except human consumption */
+    unsigned width;
+};
+
 struct variable
 {
     char*            name;
-    unsigned         width;
     char*            value;
+    struct type      type;
     struct location  loc;
     struct variable* next;
 };
@@ -76,5 +82,6 @@ struct exe_map
 
 void fail(const char *fmt, ...);
 void fail_if(int p, const char *fmt, ...);
+char* xsprintf(const char *fmt, ...);
 char* xstrdup(const char *s);
 void* xalloc(size_t size);

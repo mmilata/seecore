@@ -45,6 +45,120 @@ int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_A
     return ret;
 }
 
+void analyze_type(Dwarf_Die *die, struct type *ty)
+{
+    int ret;
+    Dwarf_Attribute at;
+
+    /* find out the values of name, byte_size and type attributes
+     * even though not all of them make sense for all tags
+     */
+    char *name = NULL;
+    if (dwarf_attr(die, DW_AT_name, &at) != NULL)
+    {
+        name = xstrdup(dwarf_formstring(&at)); /* XXX free me */
+    }
+
+    struct type sub_type = { .name = NULL, .width = 0 };
+    if (dwarf_attr(die, DW_AT_type, &at) != NULL)
+    {
+        Dwarf_Die sub_die;
+        if (dwarf_formref_die(&at, &sub_die) != NULL) /* XXX free me */
+            analyze_type(&sub_die, &sub_type);
+    }
+
+    Dwarf_Word width = 0;
+    if (dwarf_attr(die, DW_AT_byte_size, &at) != NULL)
+    {
+        if (dwarf_attr(die, DW_AT_byte_size, &at) != NULL)
+        {
+            ret = dwarf_formudata(&at, &width);
+            fail_if(ret == -1, "dwarf_formudata");
+        }
+    }
+
+    switch (dwarf_tag(die))
+    {
+    case DW_TAG_base_type:
+        ty->name = name;
+        name = NULL;
+        ty->width = (unsigned)width;
+        /* TODO: what about encoding? */
+        break;
+
+    /* type modifiers */
+    case DW_TAG_const_type:
+        ty->name = xsprintf("const %s", sub_type.name ?: "void");
+        ty->width = sub_type.width;
+        break;
+
+    case DW_TAG_pointer_type:
+        ty->width = (unsigned)width;
+        ty->name = xsprintf("%s*", sub_type.name ?: "void");
+        break;
+
+    case DW_TAG_restrict_type:
+        ty->name = xsprintf("%s restrict", sub_type.name ?: "void");
+        ty->width = sub_type.width;
+        break;
+
+    case DW_TAG_volatile_type:
+        ty->name = xsprintf("volatile %s", sub_type.name ?: "void");
+        ty->width = sub_type.width;
+        break;
+
+    case DW_TAG_typedef:
+        ty->name = name;
+        name = NULL;
+        ty->width = sub_type.width;
+        break;
+
+    case DW_TAG_array_type:
+        ty->name = xsprintf("%s[]", sub_type.name);
+        ty->width = 0; /* TODO */
+        break;
+
+    case DW_TAG_structure_type:
+        if (name)
+            ty->name = xsprintf("struct %s", name);
+        else
+            ty->name = xstrdup("struct");
+        ty->width = (unsigned)width;
+        break;
+
+    case DW_TAG_union_type:
+        if (name)
+            ty->name = xsprintf("union %s", name);
+        else
+            ty->name = xstrdup("union");
+        ty->width = (unsigned)width;
+        break;
+
+    case DW_TAG_class_type:
+        ty->name = xsprintf("class %s", name);
+        ty->width = (unsigned)width;
+        break;
+
+    case DW_TAG_enumeration_type:
+        ty->name = xsprintf("enum %s", name);
+        ty->width = (unsigned)width;
+        break;
+
+    case DW_TAG_subroutine_type:
+        ty->name = xstrdup("FUNCTION");
+        ty->width = 0; /* TODO */
+        break;
+
+    default:
+        printf("Unknown type %x named %s with width %u\n", dwarf_tag(die), name, (unsigned)width);
+        //print_die(die);
+        break;
+    }
+
+    free(sub_type.name);
+    free(name);
+}
+
 /* now i remember why i hate c */
 struct cb_var_attrs_arg
 {
@@ -58,6 +172,7 @@ static int cb_var_attrs(Dwarf_Attribute *at, void *arg)
     int ret;
     bool flag;
     Dwarf_Word w;
+    Dwarf_Die die;
 
     switch (dwarf_whatattr(at))
     {
@@ -79,7 +194,10 @@ static int cb_var_attrs(Dwarf_Attribute *at, void *arg)
         /* TODO */
         break;
     case DW_AT_type:
-        /* TODO */
+        if (dwarf_formref_die(at, &die) == NULL)
+            fail("dwarf_formref_die");
+        analyze_type(&die, &(a->var->type));
+        //printf("type: %s %u\n", a->var->type.name, a->var->type.width);
         break;
     case DW_AT_declaration:
         ret = dwarf_formflag(at, &flag);
@@ -403,6 +521,8 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
             Dwarf_Die *scope_die = &scopes[i];
             //printf("\t\t\tscope tag %x\n", dwarf_tag(&scopes[i]));
 
+            //TODO: parameters
+
             //append to frame variables
             list_append(frame->vars, frame->vars_tail, /* TODO: get rid of tail? */
                         child_variables(scope_die, files));
@@ -512,6 +632,19 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     return core;
 }
 
+static void print_var(struct variable *var, unsigned indent)
+{
+    unsigned i;
+    for (i = 0; i < indent; i++)
+        printf("\t");
+
+    printf("%s (type: %s size: %u defined: %s:%u)\n",
+           var->name,
+           var->type.name,
+           var->type.width,
+           strrchr(var->loc.file, '/')+1,
+           var->loc.line);
+}
 void print_core(struct core_contents *core)
 {
     struct variable *v;
@@ -522,10 +655,7 @@ void print_core(struct core_contents *core)
     printf("GLOBALS:\n");
     for (v = core->globals; v != NULL; v = v->next)
     {
-        printf("\t%s (%s:%u)\n",
-               v->name,
-               strrchr(v->loc.file, '/')+1,
-               v->loc.line);
+        print_var(v, 1);
     }
 
     printf("\nMEMORY MAPPING: (vaddr -> offset (size))\n");
@@ -545,10 +675,7 @@ void print_core(struct core_contents *core)
             printf("\tFrame %s (%s:%u)\n", f->name, f->loc.file, f->loc.line);
             for (v = f->vars; v != NULL; v = v->next)
             {
-                printf("\t\t%s (%s:%u)\n",
-                       v->name,
-                       strrchr(v->loc.file, '/')+1,
-                       v->loc.line);
+                print_var(v, 2);
             }
         }
         printf("\n");
