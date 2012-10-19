@@ -68,18 +68,18 @@ struct exe_map
 #define list_append(head,tail,item)          \
     do{                                      \
         void *_tmp = (item);                 \
-        if ((_tmp) == NULL)                  \
+        if (_tmp == NULL)                    \
             break;                           \
         if ((head) == NULL)                  \
         {                                    \
-            (head) = (tail) = (_tmp);        \
+            (head) = (tail) = _tmp;          \
         }                                    \
         else                                 \
         {                                    \
-            (tail)->next = (_tmp);           \
-            while ((tail)->next)             \
-                (tail) = (tail)->next;       \
+            (tail)->next = _tmp;             \
         }                                    \
+        while ((tail)->next)                 \
+            (tail) = (tail)->next;           \
     } while(0)
 
 void fail(const char *fmt, ...);
