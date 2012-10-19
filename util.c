@@ -5,6 +5,21 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+int message_level = 0;
+
+void message(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (level > message_level)
+        return;
+
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+}
+
 void fail(const char *fmt, ...)
 {
     va_list ap;
@@ -64,4 +79,3 @@ char *xsprintf(const char *fmt, ...)
     fail_if(ret == -1, "vasprintf");
     return str;
 }
-

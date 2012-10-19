@@ -27,6 +27,8 @@ struct frame
     struct location  loc;
     struct variable* vars;
     struct variable* vars_tail; /* O(1) list append */
+    struct variable* params;
+    struct variable* params_tail;
     struct frame*    next;
 };
 
@@ -85,3 +87,10 @@ void fail_if(int p, const char *fmt, ...);
 char* xsprintf(const char *fmt, ...);
 char* xstrdup(const char *s);
 void* xalloc(size_t size);
+
+extern int message_level;
+void message(int level, const char *fmt, ...);
+
+#define warn(...)  message(1, __VA_ARGS__)
+#define info(...)  message(2, __VA_ARGS__)
+#define debug(...) message(3, __VA_ARGS__)

@@ -20,7 +20,7 @@ void errors(void)
 {
     int d = dwarf_errno();
     int dw = dwfl_errno();
-    //printf("dwarf: [%d]%s dwfl: [%d]%s\n", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
+    debug("dwarf: [%d]%s dwfl: [%d]%s\n", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
 }
 
 int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_Addr base, char **file_name, Elf **elfp)
@@ -56,25 +56,22 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
     char *name = NULL;
     if (dwarf_attr(die, DW_AT_name, &at) != NULL)
     {
-        name = xstrdup(dwarf_formstring(&at)); /* XXX free me */
+        name = xstrdup(dwarf_formstring(&at));
     }
 
     struct type sub_type = { .name = NULL, .width = 0 };
     if (dwarf_attr(die, DW_AT_type, &at) != NULL)
     {
         Dwarf_Die sub_die;
-        if (dwarf_formref_die(&at, &sub_die) != NULL) /* XXX free me */
+        if (dwarf_formref_die(&at, &sub_die) != NULL)
             analyze_type(&sub_die, &sub_type);
     }
 
     Dwarf_Word width = 0;
     if (dwarf_attr(die, DW_AT_byte_size, &at) != NULL)
     {
-        if (dwarf_attr(die, DW_AT_byte_size, &at) != NULL)
-        {
-            ret = dwarf_formudata(&at, &width);
-            fail_if(ret == -1, "dwarf_formudata");
-        }
+        ret = dwarf_formudata(&at, &width);
+        fail_if(ret == -1, "dwarf_formudata");
     }
 
     switch (dwarf_tag(die))
@@ -150,7 +147,7 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
         break;
 
     default:
-        printf("Unknown type %x named %s with width %u\n", dwarf_tag(die), name, (unsigned)width);
+        warn("Unknown type 0x%x named %s with width %u\n", dwarf_tag(die), name, (unsigned)width);
         //print_die(die);
         break;
     }
@@ -159,76 +156,58 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
     free(name);
 }
 
-/* now i remember why i hate c */
-struct cb_var_attrs_arg
-{
-    struct variable *var;
-    Dwarf_Files *files;
-};
-
-static int cb_var_attrs(Dwarf_Attribute *at, void *arg)
-{
-    struct cb_var_attrs_arg *a = arg;
-    int ret;
-    bool flag;
-    Dwarf_Word w;
-    Dwarf_Die die;
-
-    switch (dwarf_whatattr(at))
-    {
-    case DW_AT_name:
-        a->var->name = xstrdup(dwarf_formstring(at));
-        //printf("name: %s\n", a->var->name);
-        break;
-    case DW_AT_decl_file:
-        ret = dwarf_formudata(at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        a->var->loc.file = xstrdup(dwarf_filesrc(a->files, (size_t)w, NULL, NULL));
-        break;
-    case DW_AT_decl_line:
-        ret = dwarf_formudata(at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        a->var->loc.line = (unsigned)w;
-        break;
-    case DW_AT_location:
-        /* TODO */
-        break;
-    case DW_AT_type:
-        if (dwarf_formref_die(at, &die) == NULL)
-            fail("dwarf_formref_die");
-        analyze_type(&die, &(a->var->type));
-        //printf("type: %s %u\n", a->var->type.name, a->var->type.width);
-        break;
-    case DW_AT_declaration:
-        ret = dwarf_formflag(at, &flag);
-        fail_if(ret == -1, "dwarf_formflag");
-        if (flag)
-            return DWARF_CB_ABORT;
-        break;
-    default:
-        break;
-    }
-
-    return DWARF_CB_OK;
-}
-
 struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
 {
-    ptrdiff_t ret;
-    struct cb_var_attrs_arg arg;
-    arg.files = files;
-    arg.var = xalloc(sizeof(struct variable));
+    int ret;
+    Dwarf_Attribute at;
+    Dwarf_Word w;
+    struct variable* var;
 
-    ret = dwarf_getattrs(die, cb_var_attrs, &arg, 0);
-    fail_if(ret == -1, "dwarf_getattrs");
-
-    if (ret != 1)
+    /* ignore declarations */
+    if (dwarf_attr_integrate(die, DW_AT_declaration, &at) != NULL)
     {
-        free(arg.var);
-        return NULL;
+        bool flag;
+        ret = dwarf_formflag(&at, &flag);
+        fail_if(ret == -1, "dwarf_formflag");
+        if (flag)
+            return NULL;
     }
 
-    return arg.var;
+    var = xalloc(sizeof(struct variable));
+
+    if (dwarf_attr_integrate(die, DW_AT_name, &at) != NULL)
+    {
+        var->name = xstrdup(dwarf_formstring(&at));
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_decl_file, &at) != NULL)
+    {
+        ret = dwarf_formudata(&at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        var->loc.file = xstrdup(dwarf_filesrc(files, (size_t)w, NULL, NULL));
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_decl_line, &at) != NULL)
+    {
+        ret = dwarf_formudata(&at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        var->loc.line = (unsigned)w;
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
+    {
+        /* TODO */
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_type, &at) != NULL)
+    {
+        Dwarf_Die type_die;
+        if (dwarf_formref_die(&at, &type_die) == NULL)
+            fail("dwarf_formref_die");
+        analyze_type(&type_die, &(var->type));
+    }
+
+    return var;
 }
 
 struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files)
@@ -280,6 +259,7 @@ struct variable* cu_globals(Dwarf_Die *cu)
     ret = dwarf_formudata(&at, &lang);
     fail_if(ret == -1, "dwarf_formudata");
 
+    /* TODO: the language should also be checked when analyzing stacks */
     switch (lang)
     {
     case DW_LANG_C89:
@@ -288,14 +268,12 @@ struct variable* cu_globals(Dwarf_Die *cu)
         /* supported language */
         break;
     case DW_LANG_C_plus_plus:
-        fail("C++ not supported");
-        /* TODO: return NULL instead */
+        warn("CU %s: C++ not supported", dwarf_diename(cu));
+        return NULL;
         break;
     default:
-        /*
-        fprintf(stderr, "CU %s: unsupported language: 0x%lx\n",
-                dwarf_diename(cu), (unsigned long)lang);
-        */
+        debug("CU %s: unsupported language: 0x%lx",
+             dwarf_diename(cu), (unsigned long)lang);
         return NULL;
         break;
     }
@@ -457,9 +435,9 @@ static int cb_subprogram_attrs(Dwarf_Attribute *at, void *arg)
 
 struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui, int thread_no, struct core_contents *core)
 {
-    printf("Thread %d:\n", thread_no);
+    info("thread %d:", thread_no);
 
-    int ret;
+    int i, ret;
     unw_cursor_t c;
 
     _UCD_select_thread(ui, thread_no);
@@ -484,19 +462,18 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
         list_append(head, tail, frame);
         /* TODO: frame IP */
 
-        printf("\t%lx\n", (unsigned long)ip);
         unw_word_t off;
         char funcname[10*1024];
         ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
-        printf("\t\t%s\n", funcname);
-        fail_if(ret < 0, "unw_get_proc_name");
+        fail_if(ret < 0, "unw_get_proc_name for IP %lx", (unsigned long)ip);
+        info("\t%lx %s", (unsigned long)ip, funcname);
 
         /* find compilation unit owning the IP */
         Dwarf_Addr bias;
         Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &bias);
         if (!cu)
         {
-            printf("\t\tcannot find CU for ip %lx\n", (unsigned long)ip);
+            warn("\t\tcannot find CU for ip %lx\n", (unsigned long)ip);
             goto next;
         }
 
@@ -504,24 +481,33 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
 
         Dwarf_Die *scopes;
         int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
-        //fail_if(ret == -1, "dwarf_getscopes");
         if (nscopes == -1)
         {
-            printf("\t\tfailed to get scopes\n");
+            warn("\t\tfailed to get scopes\n");
             goto next;
+        }
+        else if (nscopes > 0)
+        {
+            debug("\t\tscopes:");
+            for (i = 0; i < nscopes; i++)
+            {
+                Dwarf_Die *scope_die = &scopes[i];
+                debug("\t\t\ttag: 0x%x", dwarf_tag(&scopes[i]));
+            }
         }
 
         Dwarf_Files *files;
         ret = dwarf_getsrcfiles(cu, &files, NULL);
         fail_if(ret == -1, "dwarf_getsrcfiles");
 
-        int i;
         for (i = 0; i < nscopes; i++)
         {
             Dwarf_Die *scope_die = &scopes[i];
-            //printf("\t\t\tscope tag %x\n", dwarf_tag(&scopes[i]));
 
             //TODO: parameters
+            //TODO: inlined functions need more thinking
+            //  e.g. WTF is the difference between DW_TAG_inlined_subroutine
+            //  and DW_TAG_subprogram with DW_AT_abstract_origin
 
             //append to frame variables
             list_append(frame->vars, frame->vars_tail, /* TODO: get rid of tail? */
@@ -534,7 +520,7 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
                 arg.frame = frame;
                 arg.files = files;
                 dwarf_getattrs(scope_die, cb_subprogram_attrs, &arg, 0);
-                printf("\t\tfunction: %s\n", frame->name);
+                info("\t\tfunction name: %s", frame->name);
 
                 /* do not continue over subprogram boundary */
                 break;
@@ -604,6 +590,7 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     if (fd < 0)
         fail("open");
 
+    /* TODO: shall we release the Elf handle ourselves? */
     Elf *e = elf_begin(fd, ELF_C_READ, NULL);
     fail_if(e == NULL, "elf_begin");
     fail_if(elf_kind(e) != ELF_K_ELF, "elf_kind");
@@ -623,14 +610,16 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
 
     read_maps(e, core);
-
-    /* TODO: stacks */
     core->threads = unwind_stacks(dwfl, core_file, core, executable_maps(dwfl));
+    /* TODO: free executable_maps */
 
     /* TODO: location/value extraction */
+    dwfl_end(dwfl);
 
     return core;
 }
+
+/* TODO: function that frees the core_contents data structure */
 
 static void print_var(struct variable *var, unsigned indent)
 {
@@ -645,6 +634,7 @@ static void print_var(struct variable *var, unsigned indent)
            strrchr(var->loc.file, '/')+1,
            var->loc.line);
 }
+
 void print_core(struct core_contents *core)
 {
     struct variable *v;
@@ -690,9 +680,10 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    message_level = 2; /* 0 = nothing, 1 = warn, 2 = info, 3 = debug */
+
     struct core_contents *c = analyze_core(argv[1], argv[2]);
     print_core(c);
-
 
     return EXIT_SUCCESS;
 }
