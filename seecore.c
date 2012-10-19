@@ -156,11 +156,37 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
     free(name);
 }
 
-struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
+void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
+                           char **name, struct location* loc)
 {
     int ret;
     Dwarf_Attribute at;
     Dwarf_Word w;
+
+    if (dwarf_attr_integrate(die, DW_AT_name, &at) != NULL)
+    {
+        *name = xstrdup(dwarf_formstring(&at));
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_decl_file, &at) != NULL)
+    {
+        ret = dwarf_formudata(&at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        loc->file = xstrdup(dwarf_filesrc(files, (size_t)w, NULL, NULL));
+    }
+
+    if (dwarf_attr_integrate(die, DW_AT_decl_line, &at) != NULL)
+    {
+        ret = dwarf_formudata(&at, &w);
+        fail_if(ret == -1, "dwarf_formudata");
+        loc->line = (unsigned)w;
+    }
+}
+
+struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
+{
+    int ret;
+    Dwarf_Attribute at;
     struct variable* var;
 
     /* ignore declarations */
@@ -174,25 +200,7 @@ struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
     }
 
     var = xalloc(sizeof(struct variable));
-
-    if (dwarf_attr_integrate(die, DW_AT_name, &at) != NULL)
-    {
-        var->name = xstrdup(dwarf_formstring(&at));
-    }
-
-    if (dwarf_attr_integrate(die, DW_AT_decl_file, &at) != NULL)
-    {
-        ret = dwarf_formudata(&at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        var->loc.file = xstrdup(dwarf_filesrc(files, (size_t)w, NULL, NULL));
-    }
-
-    if (dwarf_attr_integrate(die, DW_AT_decl_line, &at) != NULL)
-    {
-        ret = dwarf_formudata(&at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        var->loc.line = (unsigned)w;
-    }
+    analyze_name_location(die, files, &var->name, &var->loc);
 
     if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
     {
@@ -398,43 +406,6 @@ struct exe_map* executable_maps(Dwfl *dwfl)
     return head;
 }
 
-/* TODO: factor out common code from variable attrs callback */
-/* this vvv is UGLY */
-struct cb_subprogram_attrs_arg
-{
-    struct frame *frame;
-    Dwarf_Files *files;
-};
-
-static int cb_subprogram_attrs(Dwarf_Attribute *at, void *arg)
-{
-    struct cb_subprogram_attrs_arg *a = arg;
-    int ret;
-    bool flag;
-    Dwarf_Word w;
-
-    switch (dwarf_whatattr(at))
-    {
-    case DW_AT_name:
-        a->frame->name = xstrdup(dwarf_formstring(at));
-        break;
-    case DW_AT_decl_file:
-        ret = dwarf_formudata(at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        a->frame->loc.file = xstrdup(dwarf_filesrc(a->files, (size_t)w, NULL, NULL));
-        break;
-    case DW_AT_decl_line:
-        ret = dwarf_formudata(at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        a->frame->loc.line = (unsigned)w;
-        break;
-    default:
-        break;
-    }
-
-    return DWARF_CB_OK;
-}
-
 struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui, int thread_no, struct core_contents *core)
 {
     info("thread %d:", thread_no);
@@ -521,10 +492,8 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
                             child_variables(scope_die, files, true));
 
                 /* add function name to frame struct */
-                struct cb_subprogram_attrs_arg arg;
-                arg.frame = frame;
-                arg.files = files;
-                dwarf_getattrs(scope_die, cb_subprogram_attrs, &arg, 0);
+                analyze_name_location(scope_die, files,
+                                      &frame->name, &frame->loc);
                 info("\t\tfunction name: %s", frame->name);
 
                 /* do not continue over subprogram boundary */
@@ -687,6 +656,7 @@ void print_core(struct core_contents *core)
 
 int main(int argc, char *argv[])
 {
+    //TODO: investigate DW_TAG_GNU_call_site
     if (argc < 3)
     {
         fprintf(stderr, "usage: %s <binary> <core>\n", argv[0]);
