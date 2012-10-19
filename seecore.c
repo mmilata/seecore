@@ -20,7 +20,7 @@ void errors(void)
 {
     int d = dwarf_errno();
     int dw = dwfl_errno();
-    debug("dwarf: [%d]%s dwfl: [%d]%s\n", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
+    debug("dwarf: [%d]%s dwfl: [%d]%s", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
 }
 
 int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_Addr base, char **file_name, Elf **elfp)
@@ -147,7 +147,7 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
         break;
 
     default:
-        warn("Unknown type 0x%x named %s with width %u\n", dwarf_tag(die), name, (unsigned)width);
+        warn("Unknown type 0x%x named %s with width %u", dwarf_tag(die), name, (unsigned)width);
         //print_die(die);
         break;
     }
@@ -204,7 +204,7 @@ struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
 
     if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
     {
-        /* TODO */
+        /* TODO TODO TODO */
     }
 
     if (dwarf_attr_integrate(die, DW_AT_type, &at) != NULL)
@@ -252,41 +252,49 @@ struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
     return head;
 }
 
-struct variable* cu_globals(Dwarf_Die *cu)
+bool supported_language(Dwarf_Die *cu)
 {
     int ret;
-    Dwarf_Files *files;
-    Dwarf_Attribute at;
     Dwarf_Word lang;
+    Dwarf_Attribute at;
 
     if (dwarf_attr(cu, DW_AT_language, &at) == NULL)
     {
-        fprintf(stderr, "CU %s: unknown language\n",
-                dwarf_diename(cu));
-        return NULL;
+        warn("CU %s: unknown language", dwarf_diename(cu));
+        return false;
     }
 
     ret = dwarf_formudata(&at, &lang);
     fail_if(ret == -1, "dwarf_formudata");
 
-    /* TODO: the language should also be checked when analyzing stacks */
     switch (lang)
     {
     case DW_LANG_C89:
     case DW_LANG_C:
     case DW_LANG_C99:
-        /* supported language */
+        /* good! */
         break;
     case DW_LANG_C_plus_plus:
         warn("CU %s: C++ not supported", dwarf_diename(cu));
-        return NULL;
+        return false;
         break;
     default:
         debug("CU %s: unsupported language: 0x%lx",
              dwarf_diename(cu), (unsigned long)lang);
-        return NULL;
+        return false;
         break;
     }
+
+    return true;
+}
+
+struct variable* cu_globals(Dwarf_Die *cu)
+{
+    int ret;
+    Dwarf_Files *files;
+
+    if(!supported_language(cu))
+        return NULL;
 
     ret = dwarf_getsrcfiles(cu, &files, NULL);
     fail_if(ret == -1, "dwarf_getsrcfiles");
@@ -446,7 +454,13 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
         Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &bias);
         if (!cu)
         {
-            warn("\t\tcannot find CU for ip %lx\n", (unsigned long)ip);
+            warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
+            goto next;
+        }
+
+        if (!supported_language(cu))
+        {
+            warn("\t\tunsupported CU language");
             goto next;
         }
 
@@ -456,7 +470,7 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
         int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
         if (nscopes == -1)
         {
-            warn("\t\tfailed to get scopes\n");
+            warn("\t\tfailed to get scopes");
             goto next;
         }
         else if (nscopes > 0)
@@ -579,10 +593,12 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     if (dwfl_report_end(dwfl, NULL, NULL) != 0)
         fail("dwfl_report_end");
 
+    info("analyzing globals");
     ptrdiff_t ret;
     ret = dwfl_getmodules(dwfl, analyze_module, core, 0);
     fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
 
+    info("analyzing stacks");
     read_maps(e, core);
     core->threads = unwind_stacks(dwfl, core_file, core, executable_maps(dwfl));
     /* TODO: free executable_maps */
