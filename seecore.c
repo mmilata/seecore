@@ -593,7 +593,51 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     return core;
 }
 
-/* TODO: function that frees the core_contents data structure */
+static void free_variables(struct variable *v)
+{
+    struct variable *vx;
+
+    for (; v != NULL; v = vx)
+    {
+        vx = v->next;
+        free(v->loc.file);
+        free(v->type.name);
+        free(v->name);
+        free(v->value);
+        free(v);
+    }
+}
+void free_core(struct core_contents *core)
+{
+    struct mem_map *m, *mx;
+    struct thread *t, *tx;
+    struct frame *f, *fx;
+
+    free_variables(core->globals);
+
+    for (m = core->maps; m != NULL; m = mx)
+    {
+        mx = m->next;
+        free(m);
+    }
+
+    for (t = core->threads; t != NULL; t = tx)
+    {
+        tx = t->next;
+
+        for (f = t->frames; f != NULL; f = fx)
+        {
+            fx = f->next;
+            free_variables(f->params);
+            free_variables(f->vars);
+            free(f->loc.file);
+            free(f->name);
+            free(f);
+        }
+
+        free(t);
+    }
+}
 
 static void print_var(struct variable *var, unsigned indent)
 {
@@ -608,7 +652,6 @@ static void print_var(struct variable *var, unsigned indent)
            strrchr(var->loc.file, '/')+1,
            var->loc.line);
 }
-
 void print_core(struct core_contents *core)
 {
     struct variable *v;
@@ -667,6 +710,7 @@ int main(int argc, char *argv[])
 
     struct core_contents *c = analyze_core(argv[1], argv[2]);
     print_core(c);
+    free_core(c);
 
     return EXIT_SUCCESS;
 }
