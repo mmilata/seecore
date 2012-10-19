@@ -38,29 +38,29 @@ struct thread
     struct thread* next;
 };
 
-/* TODO: rename to data_map */
-struct mem_map
+/* maps data segments to their offsets in coredump file */
+struct data_map
 {
-    uint64_t        vaddr; /* starting memory addr */
-    uint64_t        off;   /* offset in coredump */
-    uint64_t        len;   /* length */
-    struct mem_map* next;
+    uint64_t         vaddr; /* starting memory addr */
+    uint64_t         off;   /* offset in coredump */
+    uint64_t         len;   /* length */
+    struct data_map* next;
+};
+
+/* maps executable segments to their backing files - needed by libunwind */
+struct exec_map
+{
+    uint64_t         vaddr;
+    char*            file;
+    struct exec_map* next;
 };
 
 struct core_contents
 {
-    /* address -> core maps */
     struct variable* globals;
     struct variable* globals_tail;
     struct thread*   threads;
-    struct mem_map*  maps;
-};
-
-struct exe_map
-{
-    uint64_t        vaddr;
-    char*           file;
-    struct exe_map* next;
+    struct data_map* maps;
 };
 
 /* item itself can be a list, i.e. the macro also does concatenation */

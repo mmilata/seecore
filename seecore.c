@@ -23,7 +23,9 @@ void errors(void)
     debug("dwarf: [%d]%s dwfl: [%d]%s", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
 }
 
-int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_Addr base, char **file_name, Elf **elfp)
+static int find_elf_core (Dwfl_Module *mod, void **userdata,
+                          const char *modname, Dwarf_Addr base,
+                          char **file_name, Elf **elfp)
 {
     int ret = -1;
 
@@ -45,7 +47,7 @@ int my_find_elf (Dwfl_Module *mod, void **userdata, const char *modname, Dwarf_A
     return ret;
 }
 
-void analyze_type(Dwarf_Die *die, struct type *ty)
+static void analyze_type(Dwarf_Die *die, struct type *ty)
 {
     int ret;
     Dwarf_Attribute at;
@@ -148,7 +150,6 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
 
     default:
         warn("Unknown type 0x%x named %s with width %u", dwarf_tag(die), name, (unsigned)width);
-        //print_die(die);
         break;
     }
 
@@ -156,8 +157,8 @@ void analyze_type(Dwarf_Die *die, struct type *ty)
     free(name);
 }
 
-void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
-                           char **name, struct location* loc)
+static void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
+                                  char **name, struct location* loc)
 {
     int ret;
     Dwarf_Attribute at;
@@ -183,7 +184,7 @@ void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
     }
 }
 
-struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
+static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
 {
     int ret;
     Dwarf_Attribute at;
@@ -218,8 +219,8 @@ struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
     return var;
 }
 
-struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
-                                 bool params)
+static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
+                                        bool params)
 {
     int ret;
     Dwarf_Die die;
@@ -252,7 +253,7 @@ struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
     return head;
 }
 
-bool supported_language(Dwarf_Die *cu)
+static bool supported_language(Dwarf_Die *cu)
 {
     int ret;
     Dwarf_Word lang;
@@ -288,7 +289,7 @@ bool supported_language(Dwarf_Die *cu)
     return true;
 }
 
-struct variable* cu_globals(Dwarf_Die *cu)
+static struct variable* cu_globals(Dwarf_Die *cu)
 {
     int ret;
     Dwarf_Files *files;
@@ -302,7 +303,8 @@ struct variable* cu_globals(Dwarf_Die *cu)
     return child_variables(cu, files, false);
 }
 
-int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start_addr, void *arg)
+static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
+                          Dwarf_Addr start_addr, void *arg)
 {
     struct core_contents *core = arg;
 
@@ -311,15 +313,6 @@ int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Ad
     errors();
     bool have_dwarf = (dwfl_module_getdwarf (mod, &bias) != NULL);
     errors();
-
-#if 0
-    Dwarf_Addr start, end, dwbias, symbias;
-    const char *mainfile, *debugfile;
-    dwfl_module_info(mod, NULL, &start, &end, NULL, NULL, &mainfile, &debugfile);
-    printf("%s 0x%lx+%lx\n", name, start, end-start);
-    printf("\tmain: %s, debug: %s\n", /*dwbias, symbias,*/ mainfile, debugfile);
-    printf("\telf: %d, dwarf: %d\n", have_elf, have_dwarf);
-#endif
 
     if (!have_dwarf)
         return DWARF_CB_OK;
@@ -336,12 +329,12 @@ int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Ad
     return DWARF_CB_OK;
 }
 
-void read_maps(Elf *e, struct core_contents* core)
+static void read_maps(Elf *e, struct core_contents* core)
 {
     int res;
     size_t i, nheaders;
     GElf_Phdr phdr, *p;
-    struct mem_map **nextmm = &(core->maps);
+    struct data_map **nextmm = &(core->maps);
 
     res = elf_getphdrnum(e, &nheaders);
     fail_if(res != 0, "elf_getphdrnum");
@@ -371,7 +364,7 @@ void read_maps(Elf *e, struct core_contents* core)
             continue;
 
         /* append to list */
-        *nextmm = xalloc(sizeof(struct mem_map));
+        *nextmm = xalloc(sizeof(struct data_map));
         (*nextmm)->vaddr = (uint64_t)phdr.p_vaddr;
         (*nextmm)->off   = (uint64_t)phdr.p_offset;
         (*nextmm)->len   = (uint64_t)phdr.p_memsz;
@@ -379,10 +372,11 @@ void read_maps(Elf *e, struct core_contents* core)
     }
 }
 
-static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start_addr, void *arg)
+static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name,
+                       Dwarf_Addr start_addr, void *arg)
 {
     /* pointer madness! */
-    struct exe_map ***tailp = arg;
+    struct exec_map ***tailp = arg;
     const char *elf_file = NULL;
     Dwarf_Addr base;
 
@@ -390,7 +384,7 @@ static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name, Dwar
 
     if (elf_file)
     {
-        **tailp = xalloc(sizeof(struct exe_map));
+        **tailp = xalloc(sizeof(struct exec_map));
         (**tailp)->vaddr = (uint64_t)base;
         (**tailp)->file = xstrdup(elf_file);
         *tailp = &((**tailp)->next);
@@ -402,11 +396,11 @@ static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name, Dwar
 /* This HAS TO be called AFTER dwfl_getmodules(..., analyze_module, ...) as the
  * file names are resolved lazily and may not be available (or call
  * dwfl_module_getelf). */
-struct exe_map* executable_maps(Dwfl *dwfl)
+static struct exec_map* executable_maps(Dwfl *dwfl)
 {
     ptrdiff_t ret;
-    struct exe_map *head = NULL;
-    struct exe_map **tail = &head;
+    struct exec_map *head = NULL;
+    struct exec_map **tail = &head;
 
     ret = dwfl_getmodules(dwfl, cb_exe_maps, &tail, 0);
     fail_if(ret == -1, "dwfl_getmodules");
@@ -414,7 +408,8 @@ struct exe_map* executable_maps(Dwfl *dwfl)
     return head;
 }
 
-struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui, int thread_no, struct core_contents *core)
+static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
+                                   struct UCD_info *ui, int thread_no)
 {
     info("thread %d:", thread_no);
 
@@ -495,8 +490,8 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
             //  e.g. WTF is the difference between DW_TAG_inlined_subroutine
             //  and DW_TAG_subprogram with DW_AT_abstract_origin
 
-            //append to frame variables
-            list_append(frame->vars, frame->vars_tail, /* TODO: get rid of tail? */
+            /* append to frame variables */
+            list_append(frame->vars, frame->vars_tail,
                         child_variables(scope_die, files, false));
 
             if (dwarf_tag(scope_die) == DW_TAG_subprogram)
@@ -528,7 +523,8 @@ next:
     return head;
 }
 
-struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file, struct core_contents *core, struct exe_map *em)
+static struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
+                                    struct exec_map *em)
 {
     unw_addr_space_t as;
     struct UCD_info *ui;
@@ -553,7 +549,7 @@ struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file, struct core_cont
     for (tnum = 0; tnum < nthreads; tnum++)
     {
         struct thread *thread = xalloc(sizeof(struct thread));
-        thread->frames = unwind_thread(dwfl, as, ui, tnum, core);
+        thread->frames = unwind_thread(dwfl, as, ui, tnum);
         list_append(head, tail, thread);
     }
 
@@ -563,16 +559,20 @@ struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file, struct core_cont
 struct core_contents* analyze_core(const char *exe_file, const char *core_file)
 {
     Dwfl_Callbacks dwcb = {
-        .find_elf = my_find_elf, //dwfl_build_id_find_elf,
+        .find_elf = find_elf_core,
         .find_debuginfo = dwfl_build_id_find_debuginfo,
         .section_address = dwfl_offline_section_address
     };
 
     struct core_contents *core = xalloc(sizeof(*core));
+    static bool libelf_initialized = false;
 
-    /* call only once? */
-    if (elf_version(EV_CURRENT) == EV_NONE)
-        fail("elf_version");
+    if (!libelf_initialized)
+    {
+        if (elf_version(EV_CURRENT) == EV_NONE)
+            fail("elf_version");
+        libelf_initialized = true;
+    }
 
     int fd = open(core_file, O_RDONLY);
     if (fd < 0)
@@ -600,8 +600,10 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
 
     info("analyzing stacks");
     read_maps(e, core);
-    core->threads = unwind_stacks(dwfl, core_file, core, executable_maps(dwfl));
-    /* TODO: free executable_maps */
+
+    struct exec_map *exec_map = executable_maps(dwfl);
+    core->threads = unwind_stacks(dwfl, core_file, exec_map);
+    free(exec_map);
 
     /* TODO: location/value extraction */
     dwfl_end(dwfl);
@@ -625,7 +627,7 @@ static void free_variables(struct variable *v)
 }
 void free_core(struct core_contents *core)
 {
-    struct mem_map *m, *mx;
+    struct data_map *m, *mx;
     struct thread *t, *tx;
     struct frame *f, *fx;
 
@@ -671,7 +673,7 @@ static void print_var(struct variable *var, unsigned indent)
 void print_core(struct core_contents *core)
 {
     struct variable *v;
-    struct mem_map *m;
+    struct data_map *m;
     struct thread *t;
     struct frame *f;
 
@@ -715,7 +717,7 @@ void print_core(struct core_contents *core)
 
 int main(int argc, char *argv[])
 {
-    //TODO: investigate DW_TAG_GNU_call_site
+    /* TODO: investigate DW_TAG_GNU_call_site */
     if (argc < 3)
     {
         fprintf(stderr, "usage: %s <binary> <core>\n", argv[0]);
