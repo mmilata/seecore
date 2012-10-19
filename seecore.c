@@ -210,11 +210,13 @@ struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
     return var;
 }
 
-struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files)
+struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
+                                 bool params)
 {
     int ret;
     Dwarf_Die die;
     struct variable *var, *head = NULL, *tail = NULL;
+    int desired_tag = params ? DW_TAG_formal_parameter : DW_TAG_variable;
 
     ret = dwarf_child(parent, &die);
     if (ret != 0)
@@ -222,7 +224,7 @@ struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files)
 
     do
     {
-        if (dwarf_tag(&die) == DW_TAG_variable)
+        if (dwarf_tag(&die) == desired_tag)
         {
             var = analyze_variable(&die, files);
             if (!var)
@@ -281,7 +283,7 @@ struct variable* cu_globals(Dwarf_Die *cu)
     ret = dwarf_getsrcfiles(cu, &files, NULL);
     fail_if(ret == -1, "dwarf_getsrcfiles");
 
-    return child_variables(cu, files);
+    return child_variables(cu, files, false);
 }
 
 int analyze_module(Dwfl_Module *mod, void **userdata, const char *name, Dwarf_Addr start_addr, void *arg)
@@ -504,17 +506,20 @@ struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as, struct UCD_info *ui
         {
             Dwarf_Die *scope_die = &scopes[i];
 
-            //TODO: parameters
             //TODO: inlined functions need more thinking
             //  e.g. WTF is the difference between DW_TAG_inlined_subroutine
             //  and DW_TAG_subprogram with DW_AT_abstract_origin
 
             //append to frame variables
             list_append(frame->vars, frame->vars_tail, /* TODO: get rid of tail? */
-                        child_variables(scope_die, files));
+                        child_variables(scope_die, files, false));
 
             if (dwarf_tag(scope_die) == DW_TAG_subprogram)
             {
+                /* get function parameters */
+                list_append(frame->params, frame->params_tail,
+                            child_variables(scope_die, files, true));
+
                 /* add function name to frame struct */
                 struct cb_subprogram_attrs_arg arg;
                 arg.frame = frame;
@@ -663,6 +668,14 @@ void print_core(struct core_contents *core)
         for (f = t->frames; f != NULL; f = f->next)
         {
             printf("\tFrame %s (%s:%u)\n", f->name, f->loc.file, f->loc.line);
+            if (f->params)
+                printf("\tArguments:\n");
+            for (v = f->params; v != NULL; v = v->next)
+            {
+                print_var(v, 2);
+            }
+            if (f->vars)
+                printf("\tVariables:\n");
             for (v = f->vars; v != NULL; v = v->next)
             {
                 print_var(v, 2);
