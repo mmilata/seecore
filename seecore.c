@@ -37,6 +37,12 @@ static int find_elf_core (Dwfl_Module *mod, void **userdata,
 
         *file_name = realpath(executable_file, NULL);
         *elfp = elf_begin(fd, ELF_C_READ, NULL);
+        if (*elfp == NULL)
+        {
+            warn("Unable to open executable '%s': %s", executable_file, elf_errmsg(-1));
+            return -1;
+        }
+
         ret = fd;
     }
     else
@@ -184,11 +190,16 @@ static void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
     }
 }
 
-static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
+static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
+                                         struct expr_context *ctx)
 {
     int ret;
     Dwarf_Attribute at;
     struct variable* var;
+
+    /* TODO globals */
+    if (!ctx)
+        return NULL;
 
     /* ignore declarations */
     if (dwarf_attr_integrate(die, DW_AT_declaration, &at) != NULL)
@@ -203,11 +214,6 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
     var = xalloc(sizeof(struct variable));
     analyze_name_location(die, files, &var->name, &var->loc);
 
-    if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
-    {
-        /* TODO TODO TODO */
-    }
-
     if (dwarf_attr_integrate(die, DW_AT_type, &at) != NULL)
     {
         Dwarf_Die type_die;
@@ -215,12 +221,23 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files)
             fail("dwarf_formref_die");
         analyze_type(&type_die, &(var->type));
     }
+    //printf("\t\t\tsize: %d\n", var->type.width);
+
+    if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
+    {
+        size_t exprlen;
+        Dwarf_Op *expr;
+
+        ret = dwarf_getlocation_addr(&at, ctx->ip, &expr, &exprlen, 1);
+        fail_if(ret != 1, "dwarf_getlocation_addr");
+        var->value = evaluate_loc_expr(expr, exprlen, ctx, var->type.width);
+    }
 
     return var;
 }
 
 static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
-                                        bool params)
+                                        struct expr_context *ctx, bool params)
 {
     int ret;
     Dwarf_Die die;
@@ -235,14 +252,14 @@ static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
     {
         if (dwarf_tag(&die) == desired_tag)
         {
-            var = analyze_variable(&die, files);
+            var = analyze_variable(&die, files, ctx);
             if (!var)
                 continue;
 
             /* XXX */
             if (var->name && var->name[0] == '_')
             {
-                free(var);
+                free(var); /* TODO: free members */
                 continue;
             }
 
@@ -300,7 +317,7 @@ static struct variable* cu_globals(Dwarf_Die *cu)
     ret = dwarf_getsrcfiles(cu, &files, NULL);
     fail_if(ret == -1, "dwarf_getsrcfiles");
 
-    return child_variables(cu, files, false);
+    return child_variables(cu, files, NULL, false);
 }
 
 static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
@@ -329,12 +346,12 @@ static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
     return DWARF_CB_OK;
 }
 
-static void read_maps(Elf *e, struct core_contents* core)
+static struct data_map* read_maps(Elf *e)
 {
     int res;
     size_t i, nheaders;
     GElf_Phdr phdr, *p;
-    struct data_map **nextmm = &(core->maps);
+    struct data_map *head = NULL, *tail = NULL, *map;
 
     res = elf_getphdrnum(e, &nheaders);
     fail_if(res != 0, "elf_getphdrnum");
@@ -364,12 +381,14 @@ static void read_maps(Elf *e, struct core_contents* core)
             continue;
 
         /* append to list */
-        *nextmm = xalloc(sizeof(struct data_map));
-        (*nextmm)->vaddr = (uint64_t)phdr.p_vaddr;
-        (*nextmm)->off   = (uint64_t)phdr.p_offset;
-        (*nextmm)->len   = (uint64_t)phdr.p_memsz;
-        nextmm = &((*nextmm)->next);
+        map = xalloc(sizeof(struct data_map));
+        map->vaddr = (uint64_t)phdr.p_vaddr;
+        map->off   = (uint64_t)phdr.p_offset;
+        map->len   = (uint64_t)phdr.p_memsz;
+        list_append(head, tail, map);
     }
+
+    return head;
 }
 
 static int cb_exe_maps(Dwfl_Module *mod, void **userdata, const char *name,
@@ -409,16 +428,20 @@ static struct exec_map* executable_maps(Dwfl *dwfl)
 }
 
 static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
-                                   struct UCD_info *ui, int thread_no)
+                                   struct UCD_info *ui, int thread_no,
+                                   struct expr_context *ctx)
 {
     info("thread %d:", thread_no);
 
     int i, ret;
-    unw_cursor_t c;
+    unw_cursor_t c, c_cfa;
 
     _UCD_select_thread(ui, thread_no);
 
     ret = unw_init_remote(&c, as, ui);
+    fail_if(ret < 0, "unw_init_remote");
+
+    ret = unw_init_remote(&c_cfa, as, ui);
     fail_if(ret < 0, "unw_init_remote");
 
     struct frame *head = NULL, *tail = NULL;
@@ -442,11 +465,12 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
         char funcname[10*1024];
         ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
         fail_if(ret < 0, "unw_get_proc_name for IP %lx", (unsigned long)ip);
-        info("\t%lx %s", (unsigned long)ip, funcname);
+        info("\t%llx %s", (unsigned long long)ip, funcname);
 
         /* find compilation unit owning the IP */
         Dwarf_Addr bias;
         Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &bias);
+        //printf("\tbias: %lx\n", bias);
         if (!cu)
         {
             warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
@@ -478,6 +502,31 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
             }
         }
 
+        /* According to spec[1], CFA is RSP of the previous frame. However,
+         * libunwind returns CFA = RSP of the current frame. So we need to keep
+         * track of the previous (i.e. next to be unwound) frame.
+         *
+         * [1] System V Application Binary Interface AMD64 Architecture
+         *     Processor Supplement
+         *     http://www.x86-64.org/documentation/abi.pdf
+         */
+        ctx->cfa = 0;
+        ret = unw_step(&c_cfa);
+        if (ret > 0)
+        {
+            unw_word_t cfa;
+            ret = unw_get_reg(&c_cfa, UNW_X86_64_CFA, &cfa);
+            if (ret == 0)
+            {
+                ctx->cfa = (Dwarf_Addr)cfa;
+            }
+        }
+
+        /* dwarf expression evaluation needs register values */
+        ctx->curs = &c;
+        ctx->ip = (Dwarf_Addr)ip;
+
+        /* needed by child_variables */
         Dwarf_Files *files;
         ret = dwarf_getsrcfiles(cu, &files, NULL);
         fail_if(ret == -1, "dwarf_getsrcfiles");
@@ -492,13 +541,13 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
 
             /* append to frame variables */
             list_append(frame->vars, frame->vars_tail,
-                        child_variables(scope_die, files, false));
+                        child_variables(scope_die, files, ctx, false));
 
             if (dwarf_tag(scope_die) == DW_TAG_subprogram)
             {
                 /* get function parameters */
                 list_append(frame->params, frame->params_tail,
-                            child_variables(scope_die, files, true));
+                            child_variables(scope_die, files, ctx, true));
 
                 /* add function name to frame struct */
                 analyze_name_location(scope_die, files,
@@ -524,7 +573,8 @@ next:
 }
 
 static struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
-                                    struct exec_map *em)
+                                    struct exec_map *em,
+                                    struct expr_context *ctx)
 {
     unw_addr_space_t as;
     struct UCD_info *ui;
@@ -549,7 +599,7 @@ static struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
     for (tnum = 0; tnum < nthreads; tnum++)
     {
         struct thread *thread = xalloc(sizeof(struct thread));
-        thread->frames = unwind_thread(dwfl, as, ui, tnum);
+        thread->frames = unwind_thread(dwfl, as, ui, tnum, ctx);
         list_append(head, tail, thread);
     }
 
@@ -565,6 +615,7 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     };
 
     struct core_contents *core = xalloc(sizeof(*core));
+    struct expr_context ctx;
     static bool libelf_initialized = false;
 
     if (!libelf_initialized)
@@ -593,16 +644,23 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     if (dwfl_report_end(dwfl, NULL, NULL) != 0)
         fail("dwfl_report_end");
 
+    info("analyzing data segment mappings");
+    core->maps = read_maps(e);
+
+    ctx.maps = core->maps;
+    /* XXX is fd owned by libdw? do we need to copy it? */
+    ctx.core_fd = fd;
+    ctx.curs = NULL;
+    ctx.ip = 0;
+
     info("analyzing globals");
     ptrdiff_t ret;
     ret = dwfl_getmodules(dwfl, analyze_module, core, 0);
     fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
 
     info("analyzing stacks");
-    read_maps(e, core);
-
     struct exec_map *exec_map = executable_maps(dwfl);
-    core->threads = unwind_stacks(dwfl, core_file, exec_map);
+    core->threads = unwind_stacks(dwfl, core_file, exec_map, &ctx);
     free(exec_map);
 
     /* TODO: location/value extraction */
@@ -727,7 +785,7 @@ int main(int argc, char *argv[])
     message_level = 2; /* 0 = nothing, 1 = warn, 2 = info, 3 = debug */
 
     struct core_contents *c = analyze_core(argv[1], argv[2]);
-    print_core(c);
+    //print_core(c);
     free_core(c);
 
     return EXIT_SUCCESS;
