@@ -231,6 +231,21 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
     return var;
 }
 
+static void free_variables(struct variable *v)
+{
+    struct variable *vx;
+
+    for (; v != NULL; v = vx)
+    {
+        vx = v->next;
+        free(v->loc.file);
+        free(v->type.name);
+        free(v->name);
+        free(v->value);
+        free(v);
+    }
+}
+
 static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
                                         struct expr_context *ctx, bool params)
 {
@@ -254,7 +269,7 @@ static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
             /* XXX */
             if (var->name && var->name[0] == '_')
             {
-                free(var); /* TODO: free members */
+                free_variables(var);
                 continue;
             }
 
@@ -675,20 +690,6 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     return core;
 }
 
-static void free_variables(struct variable *v)
-{
-    struct variable *vx;
-
-    for (; v != NULL; v = vx)
-    {
-        vx = v->next;
-        free(v->loc.file);
-        free(v->type.name);
-        free(v->name);
-        free(v->value);
-        free(v);
-    }
-}
 void free_core(struct core_contents *core)
 {
     struct data_map *m, *mx;
@@ -798,7 +799,8 @@ void print_core(struct core_contents *core)
 
 int main(int argc, char *argv[])
 {
-    /* TODO: investigate DW_TAG_GNU_call_site */
+    /* TODO: investigate DW_TAG_GNU_call_site:
+     * http://gcc.gnu.org/wiki/summit2010?action=AttachFile&do=get&target=jelinek.pdf */
     /* TODO: decompose structs into members   */
     if (argc < 3)
     {
