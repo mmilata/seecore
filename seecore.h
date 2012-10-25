@@ -72,6 +72,7 @@ struct expr_context
     struct data_map *maps;
     Dwarf_Addr ip;
     Dwarf_Addr cfa;
+    Dwarf_Addr bias;
 };
 
 /* item itself can be a list, i.e. the macro also does concatenation */

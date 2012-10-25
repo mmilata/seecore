@@ -120,7 +120,7 @@ static void analyze_type(Dwarf_Die *die, struct type *ty)
 
     case DW_TAG_array_type:
         ty->name = xsprintf("%s[]", sub_type.name);
-        ty->width = 0; /* TODO */
+        ty->width = 8; /* TODO */
         break;
 
     case DW_TAG_structure_type:
@@ -197,10 +197,6 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
     Dwarf_Attribute at;
     struct variable* var;
 
-    /* TODO globals */
-    if (!ctx)
-        return NULL;
-
     /* ignore declarations */
     if (dwarf_attr_integrate(die, DW_AT_declaration, &at) != NULL)
     {
@@ -221,7 +217,6 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
             fail("dwarf_formref_die");
         analyze_type(&type_die, &(var->type));
     }
-    //printf("\t\t\tsize: %d\n", var->type.width);
 
     if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
     {
@@ -306,7 +301,7 @@ static bool supported_language(Dwarf_Die *cu)
     return true;
 }
 
-static struct variable* cu_globals(Dwarf_Die *cu)
+static struct variable* cu_globals(Dwarf_Die *cu, struct expr_context *ctx)
 {
     int ret;
     Dwarf_Files *files;
@@ -317,13 +312,18 @@ static struct variable* cu_globals(Dwarf_Die *cu)
     ret = dwarf_getsrcfiles(cu, &files, NULL);
     fail_if(ret == -1, "dwarf_getsrcfiles");
 
-    return child_variables(cu, files, NULL, false);
+    return child_variables(cu, files, ctx, false);
 }
 
+struct analyze_module_arg
+{
+    struct core_contents *core;
+    struct expr_context *ctx;
+};
 static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
                           Dwarf_Addr start_addr, void *arg)
 {
-    struct core_contents *core = arg;
+    struct analyze_module_arg *a = arg;
 
     GElf_Addr bias;
     bool have_elf = (dwfl_module_getelf (mod, &bias) != NULL);
@@ -334,13 +334,13 @@ static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
     if (!have_dwarf)
         return DWARF_CB_OK;
 
-    Dwarf_Addr cubias;
     Dwarf_Die *die = NULL;
 
-    while ((die = dwfl_module_nextcu(mod, die, &cubias)))
+    while ((die = dwfl_module_nextcu(mod, die, &(a->ctx->bias))))
     {
         /* TODO: sometimes, CU is analyzed multiple times - investigate */
-        list_append(core->globals, core->globals_tail, cu_globals(die));
+        list_append(a->core->globals, a->core->globals_tail,
+                    cu_globals(die, a->ctx));
     }
 
     return DWARF_CB_OK;
@@ -348,6 +348,9 @@ static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
 
 static struct data_map* read_maps(Elf *e)
 {
+    /* TODO: read-only sections in other files */
+    /* or is it? we couldn't change them so what's the point? */
+
     int res;
     size_t i, nheaders;
     GElf_Phdr phdr, *p;
@@ -368,6 +371,7 @@ static struct data_map* read_maps(Elf *e)
         if ((phdr.p_flags & PF_R) == 0)
             continue;
 
+#if 0
         /* assume writable for now */
         if ((phdr.p_flags & PF_W) == 0)
             continue;
@@ -375,6 +379,7 @@ static struct data_map* read_maps(Elf *e)
         /* not executable */
         if ((phdr.p_flags & PF_X) != 0)
             continue;
+#endif
 
         /* skip incomplete segments */
         if (phdr.p_filesz != phdr.p_memsz)
@@ -385,6 +390,7 @@ static struct data_map* read_maps(Elf *e)
         map->vaddr = (uint64_t)phdr.p_vaddr;
         map->off   = (uint64_t)phdr.p_offset;
         map->len   = (uint64_t)phdr.p_memsz;
+        debug("map: %lx - %lx", map->vaddr, map->vaddr + map->len);
         list_append(head, tail, map);
     }
 
@@ -468,9 +474,7 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
         info("\t%llx %s", (unsigned long long)ip, funcname);
 
         /* find compilation unit owning the IP */
-        Dwarf_Addr bias;
-        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &bias);
-        //printf("\tbias: %lx\n", bias);
+        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &(ctx->bias));
         if (!cu)
         {
             warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
@@ -652,10 +656,12 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     ctx.core_fd = fd;
     ctx.curs = NULL;
     ctx.ip = 0;
+    ctx.cfa = 0;
 
     info("analyzing globals");
     ptrdiff_t ret;
-    ret = dwfl_getmodules(dwfl, analyze_module, core, 0);
+    struct analyze_module_arg arg = { .core = core, .ctx = &ctx };
+    ret = dwfl_getmodules(dwfl, analyze_module, &arg, 0);
     fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
 
     info("analyzing stacks");
@@ -721,8 +727,25 @@ static void print_var(struct variable *var, unsigned indent)
     for (i = 0; i < indent; i++)
         printf("\t");
 
-    printf("%s (type: %s size: %u defined: %s:%u)\n",
-           var->name,
+    printf("%s = ", var->name);
+
+    if (var->value && var->type.width > 16)
+    {
+        printf("[toolong]");
+    }
+    else if (var->value)
+    {
+        for (i = var->type.width; i > 0; i--)
+        {
+            printf("%02hhx", var->value[i-1]);
+        }
+    }
+    else
+    {
+        printf("[UNKNOWN]");
+    }
+
+    printf(" (type: %s size: %u defined: %s:%u)\n",
            var->type.name,
            var->type.width,
            strrchr(var->loc.file, '/')+1,
@@ -776,6 +799,7 @@ void print_core(struct core_contents *core)
 int main(int argc, char *argv[])
 {
     /* TODO: investigate DW_TAG_GNU_call_site */
+    /* TODO: decompose structs into members   */
     if (argc < 3)
     {
         fprintf(stderr, "usage: %s <binary> <core>\n", argv[0]);
@@ -785,7 +809,7 @@ int main(int argc, char *argv[])
     message_level = 2; /* 0 = nothing, 1 = warn, 2 = info, 3 = debug */
 
     struct core_contents *c = analyze_core(argv[1], argv[2]);
-    //print_core(c);
+    print_core(c);
     free_core(c);
 
     return EXIT_SUCCESS;

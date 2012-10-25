@@ -12,6 +12,9 @@ static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
     off_t file_off, seek_res;
     ssize_t read_res;
 
+    addr += ctx->bias;
+    debug("core_read: %zd bytes from %lx", len, addr);
+
     for (m = ctx->maps; m != NULL; m = m->next)
     {
         if (addr >= m->vaddr && addr+len <= m->vaddr+m->len)
@@ -19,7 +22,11 @@ static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
             break;
         }
     }
-    fail_if(m == NULL, "core_read wrong address");
+    if (m == NULL)
+    {
+        debug("core_read: 0x%lx: segment not available", addr);
+        return NULL;
+    }
 
     file_off = m->off + (addr - m->vaddr);
 
@@ -52,7 +59,7 @@ static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
             return NULL;            \
         }                           \
         elems--;                    \
-        w = stack[elems]            \
+        w = stack[elems];           \
         elems++;                    \
     } while (0)
 #define TOP (elems-1)
@@ -63,15 +70,19 @@ unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t exprlen,
     int ret;
     unsigned i, elems = 0;
     Dwarf_Word stack[STACKSIZE];
+    Dwarf_Word location;
     unw_word_t w;
 
-    printf("\t\t\tCFA: %lx\n", ctx->cfa);
-    printf("\t\t\t");
+    debug("evaluating DWARF expression:");
+    for (i = 0; i < exprlen; i++)
+    {
+        Dwarf_Op *o = expr + i;
+        debug("\t%x (%lx %lx)", o->atom, o->number, o->number2);
+    }
 
     for (i = 0; i < exprlen; i++)
     {
         Dwarf_Op *o = expr + i;
-        printf("%hx (%ld %ld) ", o->atom, o->number, o->number2);
 
         switch (o->atom)
         {
@@ -80,25 +91,28 @@ unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t exprlen,
              *       always DW_OP_call_frame_cfa */
             fail_if(ctx->cfa == 0, "ctx->cfa");
             PUSH(ctx->cfa + o->number);
-            //printf("%lx", stack[TOP]);
             break;
+        case DW_OP_addr:
+        case DW_OP_const8u:
+            PUSH(o->number);
+            break;
+        case DW_OP_GNU_push_tls_address:
+            warn("unknown opcode %x (not fatal)", o->atom);
+            return NULL;
         default:
+            /* TODO: implement the rest */
             fail("unknown opcode %x", o->atom);
+            return NULL;
             break;
         }
     }
-    printf("\n");
 
-    if (elems == 0)
+    /* returns null if stack is empty */
+    POP(location);
+
+    unsigned char *val = core_read(ctx, location, data_len);
+    if (val == NULL)
         return NULL;
-
-    unsigned char *val = core_read(ctx, stack[TOP], data_len);
-    printf("\t\t\tresult: ");
-    for (i = 0; i < data_len; i++)
-    {
-        printf("%02hhx", val[data_len-1-i]);
-    }
-    printf("\n");
 
     return val;
 }
