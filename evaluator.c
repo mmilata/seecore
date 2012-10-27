@@ -1,8 +1,11 @@
 #include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
+
 #include <dwarf.h>
 #include <elfutils/libdw.h>
+
 #include "seecore.h"
 
 static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
@@ -40,6 +43,21 @@ static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
     return result;
 }
 
+static unsigned char* register_content(struct expr_context *ctx, int regnum, size_t len)
+{
+    int ret;
+    unw_word_t val;
+
+    fail_if(len > 8, "requested too much data from register"); /* XXX: arch-dependent */
+    /* Assume the libunwind register numbers are the same as DWARF register
+     * numbers. We'll need a translation table/function otherwise. */
+    ret = unw_get_reg(ctx->curs, regnum, &val);
+    fail_if(ret != 0, "unw_get_reg");
+
+    unsigned char *result = xalloc(len);
+    return memcpy(result, &val, len);
+}
+
 #define STACKSIZE 128
 #define PUSH(w)                     \
     do {                            \
@@ -60,7 +78,6 @@ static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
         }                           \
         elems--;                    \
         w = stack[elems];           \
-        elems++;                    \
     } while (0)
 #define TOP (elems-1)
 
@@ -92,15 +109,35 @@ unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t exprlen,
             fail_if(ctx->cfa == 0, "ctx->cfa");
             PUSH(ctx->cfa + o->number);
             break;
+
         case DW_OP_addr:
         case DW_OP_const8u:
             PUSH(o->number);
             break;
+
+        case DW_OP_lit0 ... DW_OP_lit31:
+            PUSH((Dwarf_Word)(o->atom - DW_OP_lit0));
+            break;
+
         case DW_OP_GNU_push_tls_address:
             warn("unknown opcode %x (not fatal)", o->atom);
             return NULL;
+            break;
+
+        case DW_OP_reg0 ... DW_OP_reg31:
+            fail_if(exprlen != 1, "DW_OP_regN");
+            int regnum = o->atom - DW_OP_reg0;
+            return register_content(ctx, regnum, data_len);
+            break;
+
+        case DW_OP_regx:
+            fail_if(exprlen != 1, "DW_OP_regx");
+            return register_content(ctx, o->number, data_len);
+            break;
+
         default:
             /* TODO: implement the rest */
+            /* priority: DW_OP_stack_value */
             fail("unknown opcode %x", o->atom);
             return NULL;
             break;
