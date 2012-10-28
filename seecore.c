@@ -224,7 +224,20 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
         Dwarf_Op *expr;
 
         ret = dwarf_getlocation_addr(&at, ctx->ip, &expr, &exprlen, 1);
-        fail_if(ret != 1, "dwarf_getlocation_addr");
+        if (ret != 1)
+        {
+            if (ret == -1)
+                /* it seems that elfutils have some kind of problem with
+                 * DW_OP_GNU_entry_value but that operation is useless for us
+                 * anyway */
+                warn("cannot get location for variable %s (ip: %lx), %s", var->name, ctx->ip, dwarf_errmsg(-1));
+            else if (ret == 0)
+                debug("no location available for variable %s (ip: %lx)");
+            else
+                fail("unreachable reached");
+            return var;
+        }
+
         var->value = evaluate_loc_expr(expr, exprlen, ctx, var->type.width);
     }
 
@@ -448,6 +461,89 @@ static struct exec_map* executable_maps(Dwfl *dwfl)
     return head;
 }
 
+/* Note that the function:
+ *  - updates scopes and nscopes if the currently analyzed scopes corresponded
+ *    to an inline function
+ *  - frees scopes if currently analyzed scope was not-inlined function
+ */
+static struct frame* analyze_scopes(Dwarf_Die **scopes, int *nscopes,
+                             struct expr_context *ctx,
+                             Dwarf_Files *files, bool skip_first)
+{
+    int i;
+    Dwarf_Die *scope_die;
+
+    if (*nscopes == -1)
+    {
+        warn("\t\tfailed to get scopes");
+        return NULL;
+    }
+    else if (*nscopes == 0)
+    {
+        debug("\t\tno scopes");
+        return NULL;
+    }
+    else if (*nscopes > 0)
+    {
+        debug("\t\tscopes:");
+        for (i = 0; i < *nscopes; i++)
+        {
+            debug("\t\t\ttag: 0x%x\toffset: %lx", dwarf_tag(&(*scopes)[i]),
+                  dwarf_dieoffset(&(*scopes)[i]));
+        }
+    }
+
+    int tag;
+    bool boundary = false;
+    struct frame *frame = xalloc(sizeof(*frame));
+
+    /* iterate and extract variable until we reach function boundary */
+    i = (skip_first ? 1 : 0);
+    for (; i < *nscopes; i++)
+    {
+        scope_die = &(*scopes)[i];
+
+        list_append(frame->vars, frame->vars_tail,
+                    child_variables(scope_die, files, ctx, false));
+
+        tag = dwarf_tag(scope_die);
+        boundary = (tag == DW_TAG_subprogram
+                 || tag == DW_TAG_inlined_subroutine);
+        if (boundary)
+        {
+            /* get function parameters */
+            list_append(frame->params, frame->params_tail,
+                        child_variables(scope_die, files, ctx, true));
+
+            /* add function name to frame struct */
+            analyze_name_location(scope_die, files,
+                                  &frame->name, &frame->loc);
+            info("\t\tfunction name: %s", frame->name);
+            break;
+        }
+    }
+
+    fail_if(!boundary, "missing function boundary");
+
+    /* we have to make a copy of the *scope_die as the pointer points inside
+     * scopes[] which we want to free */
+    Dwarf_Die tmp = *scope_die;
+    free(*scopes);
+
+    /* if this function is not inlined, do not update the scopes array as we
+     * don't want to continue further */
+    if (tag == DW_TAG_subprogram)
+    {
+        *nscopes = 0;
+        return frame;
+    }
+
+    /* otherwise, get scopes for the inlined function, i.e. function into which
+     * it was inlined */
+    *nscopes = dwarf_getscopes_die(&tmp, scopes);
+    return frame;
+}
+
 static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
                                    struct UCD_info *ui, int thread_no,
                                    struct expr_context *ctx)
@@ -478,48 +574,11 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
         if (ip == 0)
             break;
 
-        struct frame *frame = xalloc(sizeof(struct frame));
-        list_append(head, tail, frame);
-        /* TODO: frame IP */
-
         unw_word_t off;
         char funcname[10*1024];
         ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
         fail_if(ret < 0, "unw_get_proc_name for IP %lx", (unsigned long)ip);
         info("\t%llx %s", (unsigned long long)ip, funcname);
-
-        /* find compilation unit owning the IP */
-        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &(ctx->bias));
-        if (!cu)
-        {
-            warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
-            goto next;
-        }
-
-        if (!supported_language(cu))
-        {
-            warn("\t\tunsupported CU language");
-            goto next;
-        }
-
-        /* TODO: we have CU - fall back to CU name if subprogram not found */
-
-        Dwarf_Die *scopes;
-        int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
-        if (nscopes == -1)
-        {
-            warn("\t\tfailed to get scopes");
-            goto next;
-        }
-        else if (nscopes > 0)
-        {
-            debug("\t\tscopes:");
-            for (i = 0; i < nscopes; i++)
-            {
-                Dwarf_Die *scope_die = &scopes[i];
-                debug("\t\t\ttag: 0x%x", dwarf_tag(&scopes[i]));
-            }
-        }
 
         /* According to spec[1], CFA is RSP of the previous frame. However,
          * libunwind returns CFA = RSP of the current frame. So we need to keep
@@ -541,44 +600,65 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
             }
         }
 
-        /* dwarf expression evaluation needs register values */
-        ctx->curs = &c;
-        ctx->ip = (Dwarf_Addr)ip;
+        /* find compilation unit owning the IP */
+        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &(ctx->bias));
+        if (!cu)
+        {
+            warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
+            goto synth_frame;
+        }
+
+        if (!supported_language(cu))
+        {
+            warn("\t\tunsupported CU language");
+            goto synth_frame;
+        }
 
         /* needed by child_variables */
         Dwarf_Files *files;
         ret = dwarf_getsrcfiles(cu, &files, NULL);
         fail_if(ret == -1, "dwarf_getsrcfiles");
 
-        for (i = 0; i < nscopes; i++)
+        /* dwarf expression evaluation needs register values */
+        ctx->curs = &c;
+        ctx->ip = (Dwarf_Addr)ip;
+
+        /* TODO: we have CU - fall back to CU name if subprogram not found */
+
+        /* Following code deals with inlined functions, which do not have their
+         * own stack frame. It is somewhat ugly due to two constraints:
+         *  - we want to produce at least one frame even if analyze_scopes
+         *    fails
+         *  - we may want to further process the frame that is returned the
+         *    last, i.e. the one that belongs to the non-inlined function
+         */
+        Dwarf_Die *scopes;
+        int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
+        struct frame *frame = analyze_scopes(&scopes, &nscopes, ctx, files, false);
+
+        if (frame == NULL)
         {
-            Dwarf_Die *scope_die = &scopes[i];
-
-            //TODO: inlined functions need more thinking
-            //  e.g. WTF is the difference between DW_TAG_inlined_subroutine
-            //  and DW_TAG_subprogram with DW_AT_abstract_origin
-
-            /* append to frame variables */
-            list_append(frame->vars, frame->vars_tail,
-                        child_variables(scope_die, files, ctx, false));
-
-            if (dwarf_tag(scope_die) == DW_TAG_subprogram)
-            {
-                /* get function parameters */
-                list_append(frame->params, frame->params_tail,
-                            child_variables(scope_die, files, ctx, true));
-
-                /* add function name to frame struct */
-                analyze_name_location(scope_die, files,
-                                      &frame->name, &frame->loc);
-                info("\t\tfunction name: %s", frame->name);
-
-                /* do not continue over subprogram boundary */
-                break;
-            }
+            goto synth_frame;
         }
 
-        //??? free(scopes);
+        struct frame *last_frame;
+        while (frame)
+        {
+            list_append(head, tail, frame);
+            last_frame = frame;
+            frame = analyze_scopes(&scopes, &nscopes, ctx, files, true);
+        }
+        frame = last_frame;
+        /* frame->ip = (uint64_t)ip; */
+
+        goto next;
+
+synth_frame:
+        /* synthesize frame even though we have no other information except
+         * that it's there */
+        frame = xalloc(sizeof(*frame));
+        list_append(head, tail, frame);
+        /* frame->ip = (uint64_t)ip; */
 
 next:
         ret = unw_step(&c);
@@ -684,7 +764,6 @@ struct core_contents* analyze_core(const char *exe_file, const char *core_file)
     core->threads = unwind_stacks(dwfl, core_file, exec_map, &ctx);
     free(exec_map);
 
-    /* TODO: location/value extraction */
     dwfl_end(dwfl);
 
     return core;
@@ -800,7 +879,8 @@ void print_core(struct core_contents *core)
 int main(int argc, char *argv[])
 {
     /* TODO: investigate DW_TAG_GNU_call_site:
-     * http://gcc.gnu.org/wiki/summit2010?action=AttachFile&do=get&target=jelinek.pdf */
+     * http://gcc.gnu.org/wiki/summit2010?action=AttachFile&do=get&target=jelinek.pdf
+     * http://gcc.gnu.org/ml/gcc-patches/2010-08/txt00153.txt */
     /* TODO: decompose structs into members   */
     if (argc < 3)
     {
