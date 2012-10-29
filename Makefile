@@ -2,7 +2,7 @@ PROG=seecore
 LIBS=-lelf -ldw -lunwind-generic -lunwind-coredump
 CFLAGS+=-g -Wall -Wextra -Wno-unused
 
-$(PROG): util.c seecore.c evaluator.c
+$(PROG): seecore.c util.c evaluator.c variable.c stack.c
 	$(CC) $(CFLAGS) -o $@ $(LIBS) $+
 
 run: seecore

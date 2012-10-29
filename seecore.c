@@ -6,9 +6,6 @@
 
 #include <libelf.h>
 #include <elfutils/libdwfl.h>
-#include <dwarf.h>
-
-#include <libunwind-coredump.h>
 
 #include "seecore.h"
 
@@ -51,306 +48,6 @@ static int find_elf_core (Dwfl_Module *mod, void **userdata,
     }
 
     return ret;
-}
-
-static void analyze_type(Dwarf_Die *die, struct type *ty)
-{
-    int ret;
-    Dwarf_Attribute at;
-
-    /* find out the values of name, byte_size and type attributes
-     * even though not all of them make sense for all tags
-     */
-    char *name = NULL;
-    if (dwarf_attr(die, DW_AT_name, &at) != NULL)
-    {
-        name = xstrdup(dwarf_formstring(&at));
-    }
-
-    struct type sub_type = { .name = NULL, .width = 0 };
-    if (dwarf_attr(die, DW_AT_type, &at) != NULL)
-    {
-        Dwarf_Die sub_die;
-        if (dwarf_formref_die(&at, &sub_die) != NULL)
-            analyze_type(&sub_die, &sub_type);
-    }
-
-    Dwarf_Word width = 0;
-    if (dwarf_attr(die, DW_AT_byte_size, &at) != NULL)
-    {
-        ret = dwarf_formudata(&at, &width);
-        fail_if(ret == -1, "dwarf_formudata");
-    }
-
-    switch (dwarf_tag(die))
-    {
-    case DW_TAG_base_type:
-        ty->name = name;
-        name = NULL;
-        ty->width = (unsigned)width;
-        /* TODO: what about encoding? */
-        break;
-
-    /* type modifiers */
-    case DW_TAG_const_type:
-        ty->name = xsprintf("const %s", sub_type.name ?: "void");
-        ty->width = sub_type.width;
-        break;
-
-    case DW_TAG_pointer_type:
-        ty->width = (unsigned)width;
-        ty->name = xsprintf("%s*", sub_type.name ?: "void");
-        break;
-
-    case DW_TAG_restrict_type:
-        ty->name = xsprintf("%s restrict", sub_type.name ?: "void");
-        ty->width = sub_type.width;
-        break;
-
-    case DW_TAG_volatile_type:
-        ty->name = xsprintf("volatile %s", sub_type.name ?: "void");
-        ty->width = sub_type.width;
-        break;
-
-    case DW_TAG_typedef:
-        ty->name = name;
-        name = NULL;
-        ty->width = sub_type.width;
-        break;
-
-    case DW_TAG_array_type:
-        ty->name = xsprintf("%s[]", sub_type.name);
-        ty->width = 8; /* TODO */
-        break;
-
-    case DW_TAG_structure_type:
-        if (name)
-            ty->name = xsprintf("struct %s", name);
-        else
-            ty->name = xstrdup("struct");
-        ty->width = (unsigned)width;
-        break;
-
-    case DW_TAG_union_type:
-        if (name)
-            ty->name = xsprintf("union %s", name);
-        else
-            ty->name = xstrdup("union");
-        ty->width = (unsigned)width;
-        break;
-
-    case DW_TAG_class_type:
-        ty->name = xsprintf("class %s", name);
-        ty->width = (unsigned)width;
-        break;
-
-    case DW_TAG_enumeration_type:
-        ty->name = xsprintf("enum %s", name);
-        ty->width = (unsigned)width;
-        break;
-
-    case DW_TAG_subroutine_type:
-        ty->name = xstrdup("FUNCTION");
-        ty->width = 0; /* TODO */
-        break;
-
-    default:
-        warn("Unknown type 0x%x named %s with width %u", dwarf_tag(die), name, (unsigned)width);
-        break;
-    }
-
-    free(sub_type.name);
-    free(name);
-}
-
-static void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files,
-                                  char **name, struct location* loc)
-{
-    int ret;
-    Dwarf_Attribute at;
-    Dwarf_Word w;
-
-    if (dwarf_attr_integrate(die, DW_AT_name, &at) != NULL)
-    {
-        *name = xstrdup(dwarf_formstring(&at));
-    }
-
-    if (dwarf_attr_integrate(die, DW_AT_decl_file, &at) != NULL)
-    {
-        ret = dwarf_formudata(&at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        loc->file = xstrdup(dwarf_filesrc(files, (size_t)w, NULL, NULL));
-    }
-
-    if (dwarf_attr_integrate(die, DW_AT_decl_line, &at) != NULL)
-    {
-        ret = dwarf_formudata(&at, &w);
-        fail_if(ret == -1, "dwarf_formudata");
-        loc->line = (unsigned)w;
-    }
-}
-
-static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
-                                         struct expr_context *ctx)
-{
-    int ret;
-    Dwarf_Attribute at;
-    struct variable* var;
-
-    /* ignore declarations */
-    if (dwarf_attr_integrate(die, DW_AT_declaration, &at) != NULL)
-    {
-        bool flag;
-        ret = dwarf_formflag(&at, &flag);
-        fail_if(ret == -1, "dwarf_formflag");
-        if (flag)
-            return NULL;
-    }
-
-    var = xalloc(sizeof(struct variable));
-    analyze_name_location(die, files, &var->name, &var->loc);
-
-    if (dwarf_attr_integrate(die, DW_AT_type, &at) != NULL)
-    {
-        Dwarf_Die type_die;
-        if (dwarf_formref_die(&at, &type_die) == NULL)
-            fail("dwarf_formref_die");
-        analyze_type(&type_die, &(var->type));
-    }
-
-    if (dwarf_attr_integrate(die, DW_AT_const_value, &at) != NULL)
-    {
-        Dwarf_Word w;
-        Dwarf_Block bl;
-        unsigned int form = dwarf_whatform(&at);
-        debug("variable %s has constant value of form %x", var->name, form);
-
-        if (dwarf_formudata(&at, &w) == 0)
-        {
-            fail_if(sizeof(w) < var->type.width, "constant value too small");
-            var->value = xalloc(var->type.width);
-            memcpy(var->value, &w, var->type.width);
-        }
-        else if (dwarf_formblock(&at, &bl) == 0)
-        {
-            fail_if(bl.length < var->type.width, "constant value too small");
-            var->value = xalloc(var->type.width);
-            memcpy(var->value, bl.data, var->type.width);
-        }
-        else
-        {
-            warn("unable to get constant value of variable %x (form %x)", var->name, form);
-        }
-    }
-    else if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
-    {
-        size_t exprlen;
-        Dwarf_Op *expr;
-
-        ret = dwarf_getlocation_addr(&at, ctx->ip, &expr, &exprlen, 1);
-        if (ret != 1)
-        {
-            if (ret == -1)
-                /* it seems that elfutils have some kind of problem with
-                 * DW_OP_GNU_entry_value but that operation is useless for us
-                 * anyway */
-                warn("cannot get location for variable %s (ip: %lx), %s", var->name, ctx->ip, dwarf_errmsg(-1));
-            else if (ret == 0)
-                debug("no location available for variable %s (ip: %lx)", var->name, ctx->ip);
-            else
-                fail("unreachable reached");
-            return var;
-        }
-
-        var->value = evaluate_loc_expr(expr, exprlen, ctx, var->type.width);
-    }
-
-    return var;
-}
-
-static void free_variables(struct variable *v)
-{
-    struct variable *vx;
-
-    for (; v != NULL; v = vx)
-    {
-        vx = v->next;
-        free(v->loc.file);
-        free(v->type.name);
-        free(v->name);
-        free(v->value);
-        free(v);
-    }
-}
-
-static struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
-                                        struct expr_context *ctx, bool params)
-{
-    int ret;
-    Dwarf_Die die;
-    struct variable *var, *head = NULL, *tail = NULL;
-    int desired_tag = params ? DW_TAG_formal_parameter : DW_TAG_variable;
-
-    ret = dwarf_child(parent, &die);
-    if (ret != 0)
-        return NULL;
-
-    do
-    {
-        if (dwarf_tag(&die) == desired_tag)
-        {
-            var = analyze_variable(&die, files, ctx);
-            if (!var)
-                continue;
-
-            /* XXX */
-            if (var->name && var->name[0] == '_')
-            {
-                free_variables(var);
-                continue;
-            }
-
-            list_append(head, tail, var);
-        }
-    } while (dwarf_siblingof(&die, &die) == 0);
-
-    return head;
-}
-
-static bool supported_language(Dwarf_Die *cu)
-{
-    int ret;
-    Dwarf_Word lang;
-    Dwarf_Attribute at;
-
-    if (dwarf_attr(cu, DW_AT_language, &at) == NULL)
-    {
-        warn("CU %s: unknown language", dwarf_diename(cu));
-        return false;
-    }
-
-    ret = dwarf_formudata(&at, &lang);
-    fail_if(ret == -1, "dwarf_formudata");
-
-    switch (lang)
-    {
-    case DW_LANG_C89:
-    case DW_LANG_C:
-    case DW_LANG_C99:
-        /* good! */
-        break;
-    case DW_LANG_C_plus_plus:
-        warn("CU %s: C++ not supported", dwarf_diename(cu));
-        return false;
-        break;
-    default:
-        debug("CU %s: unsupported language: 0x%lx",
-             dwarf_diename(cu), (unsigned long)lang);
-        return false;
-        break;
-    }
-
-    return true;
 }
 
 static struct variable* cu_globals(Dwarf_Die *cu, struct expr_context *ctx)
@@ -485,314 +182,6 @@ static struct exec_map* executable_maps(Dwfl *dwfl)
     return head;
 }
 
-/* Note that the function:
- *  - updates scopes and nscopes if the currently analyzed scopes corresponded
- *    to an inline function
- *  - frees scopes if currently analyzed scope was not-inlined function
- */
-static struct frame* analyze_scopes(Dwarf_Die **scopes, int *nscopes,
-                             struct expr_context *ctx,
-                             Dwarf_Files *files, bool skip_first)
-{
-    int i;
-    Dwarf_Die *scope_die;
-
-    if (*nscopes == -1)
-    {
-        warn("\t\tfailed to get scopes");
-        return NULL;
-    }
-    else if (*nscopes == 0)
-    {
-        debug("\t\tno scopes");
-        return NULL;
-    }
-    else if (*nscopes > 0)
-    {
-        debug("\t\tscopes:");
-        for (i = 0; i < *nscopes; i++)
-        {
-            debug("\t\t\ttag: 0x%x\toffset: %lx", dwarf_tag(&(*scopes)[i]),
-                  dwarf_dieoffset(&(*scopes)[i]));
-        }
-    }
-
-    int tag;
-    bool boundary = false;
-    struct frame *frame = xalloc(sizeof(*frame));
-
-    /* iterate and extract variable until we reach function boundary */
-    i = (skip_first ? 1 : 0);
-    for (; i < *nscopes; i++)
-    {
-        scope_die = &(*scopes)[i];
-
-        list_append(frame->vars, frame->vars_tail,
-                    child_variables(scope_die, files, ctx, false));
-
-        tag = dwarf_tag(scope_die);
-        boundary = (tag == DW_TAG_subprogram
-                 || tag == DW_TAG_inlined_subroutine);
-        if (boundary)
-        {
-            /* get function parameters */
-            list_append(frame->params, frame->params_tail,
-                        child_variables(scope_die, files, ctx, true));
-
-            /* add function name to frame struct */
-            analyze_name_location(scope_die, files,
-                                  &frame->name, &frame->loc);
-            info("\t\tfunction name: %s", frame->name);
-            break;
-        }
-    }
-
-    fail_if(!boundary, "missing function boundary");
-
-    /* we have to make a copy of the *scope_die as the pointer points inside
-     * scopes[] which we want to free */
-    Dwarf_Die tmp = *scope_die;
-    free(*scopes);
-
-    /* if this function is not inlined, do not update the scopes array as we
-     * don't want to continue further */
-    if (tag == DW_TAG_subprogram)
-    {
-        *nscopes = 0;
-        return frame;
-    }
-
-    /* otherwise, get scopes for the inlined function, i.e. function into which
-     * it was inlined */
-    *nscopes = dwarf_getscopes_die(&tmp, scopes);
-    return frame;
-}
-
-static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
-                                   struct UCD_info *ui, int thread_no,
-                                   struct expr_context *ctx)
-{
-    info("thread %d:", thread_no);
-
-    int i, ret;
-    unw_cursor_t c, c_cfa;
-
-    _UCD_select_thread(ui, thread_no);
-
-    ret = unw_init_remote(&c, as, ui);
-    fail_if(ret < 0, "unw_init_remote");
-
-    ret = unw_init_remote(&c_cfa, as, ui);
-    fail_if(ret < 0, "unw_init_remote");
-
-    struct frame *head = NULL, *tail = NULL;
-
-    /* infinite loop insurance */
-    int count = 1000;
-    while (--count > 0)
-    {
-        unw_word_t ip;
-        ret = unw_get_reg(&c, UNW_REG_IP, &ip);
-        fail_if(ret < 0, "unw_get_reg");
-
-        if (ip == 0)
-            break;
-
-        unw_word_t off;
-        char funcname[10*1024];
-        ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
-        fail_if(ret < 0, "unw_get_proc_name for IP %lx", (unsigned long)ip);
-        info("\t%llx %s", (unsigned long long)ip, funcname);
-
-        /* According to spec[1], CFA is RSP of the previous frame. However,
-         * libunwind returns CFA = RSP of the current frame. So we need to keep
-         * track of the previous (i.e. next to be unwound) frame.
-         *
-         * [1] System V Application Binary Interface AMD64 Architecture
-         *     Processor Supplement
-         *     http://www.x86-64.org/documentation/abi.pdf
-         */
-        ctx->cfa = 0;
-        ret = unw_step(&c_cfa);
-        if (ret > 0)
-        {
-            unw_word_t cfa;
-            ret = unw_get_reg(&c_cfa, UNW_X86_64_CFA, &cfa);
-            if (ret == 0)
-            {
-                ctx->cfa = (Dwarf_Addr)cfa;
-            }
-        }
-
-        /* find compilation unit owning the IP */
-        Dwarf_Die *cu = dwfl_addrdie(dwfl, (Dwarf_Addr)ip, &(ctx->bias));
-        if (!cu)
-        {
-            warn("\t\tcannot find CU for ip %lx", (unsigned long)ip);
-            goto synth_frame;
-        }
-
-        if (!supported_language(cu))
-        {
-            warn("\t\tunsupported CU language");
-            goto synth_frame;
-        }
-
-        /* needed by child_variables */
-        Dwarf_Files *files;
-        ret = dwarf_getsrcfiles(cu, &files, NULL);
-        fail_if(ret == -1, "dwarf_getsrcfiles");
-
-        /* dwarf expression evaluation needs register values */
-        ctx->curs = &c;
-        ctx->ip = (Dwarf_Addr)ip;
-
-        /* TODO: we have CU - fall back to CU name if subprogram not found */
-
-        /* Following code deals with inlined functions, which do not have their
-         * own stack frame. It is somewhat ugly due to two constraints:
-         *  - we want to produce at least one frame even if analyze_scopes
-         *    fails
-         *  - we may want to further process the frame that is returned the
-         *    last, i.e. the one that belongs to the non-inlined function
-         */
-        Dwarf_Die *scopes;
-        int nscopes = dwarf_getscopes(cu, (Dwarf_Addr)ip, &scopes);
-        struct frame *frame = analyze_scopes(&scopes, &nscopes, ctx, files, false);
-
-        if (frame == NULL)
-        {
-            goto synth_frame;
-        }
-
-        struct frame *last_frame;
-        while (frame)
-        {
-            list_append(head, tail, frame);
-            last_frame = frame;
-            frame = analyze_scopes(&scopes, &nscopes, ctx, files, true);
-        }
-        frame = last_frame;
-        /* frame->ip = (uint64_t)ip; */
-
-        goto next;
-
-synth_frame:
-        /* synthesize frame even though we have no other information except
-         * that it's there */
-        frame = xalloc(sizeof(*frame));
-        list_append(head, tail, frame);
-        /* frame->ip = (uint64_t)ip; */
-
-next:
-        ret = unw_step(&c);
-        fail_if(ret < 0, "unw_step");
-
-        if (ret == 0)
-            break;
-    }
-
-    return head;
-}
-
-static struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
-                                    struct exec_map *em,
-                                    struct expr_context *ctx)
-{
-    unw_addr_space_t as;
-    struct UCD_info *ui;
-    struct thread *head = NULL, *tail = NULL;
-
-    as = unw_create_addr_space(&_UCD_accessors, 0);
-    fail_if(!as, "unw_create_addr_space");
-
-    ui = _UCD_create(core_file);
-    fail_if(!ui, "_UCD_create");
-
-    for (; em != NULL; em = em->next)
-    {
-        if (_UCD_add_backing_file_at_vaddr(ui, em->vaddr, em->file) < 0)
-        {
-            fail("_UCD_add_backing_file_at_vaddr");
-        }
-    }
-
-    int tnum;
-    int nthreads = _UCD_get_num_threads(ui);
-    for (tnum = 0; tnum < nthreads; tnum++)
-    {
-        struct thread *thread = xalloc(sizeof(struct thread));
-        thread->frames = unwind_thread(dwfl, as, ui, tnum, ctx);
-        list_append(head, tail, thread);
-    }
-
-    return head;
-}
-
-struct core_contents* analyze_core(const char *exe_file, const char *core_file)
-{
-    Dwfl_Callbacks dwcb = {
-        .find_elf = find_elf_core,
-        .find_debuginfo = dwfl_build_id_find_debuginfo,
-        .section_address = dwfl_offline_section_address
-    };
-
-    struct core_contents *core = xalloc(sizeof(*core));
-    struct expr_context ctx;
-    static bool libelf_initialized = false;
-
-    if (!libelf_initialized)
-    {
-        if (elf_version(EV_CURRENT) == EV_NONE)
-            fail("elf_version");
-        libelf_initialized = true;
-    }
-
-    int fd = open(core_file, O_RDONLY);
-    if (fd < 0)
-        fail("open");
-
-    /* TODO: shall we release the Elf handle ourselves? */
-    Elf *e = elf_begin(fd, ELF_C_READ, NULL);
-    fail_if(e == NULL, "elf_begin");
-    fail_if(elf_kind(e) != ELF_K_ELF, "elf_kind");
-
-    Dwfl *dwfl = dwfl_begin(&dwcb);
-
-    executable_file = exe_file;
-
-    if (dwfl_core_file_report(dwfl, e) == -1)
-        fail("dwfl_core_file_report");
-
-    if (dwfl_report_end(dwfl, NULL, NULL) != 0)
-        fail("dwfl_report_end");
-
-    info("analyzing data segment mappings");
-    core->maps = read_maps(e);
-
-    ctx.maps = core->maps;
-    /* XXX is fd owned by libdw? do we need to copy it? */
-    ctx.core_fd = fd;
-    ctx.curs = NULL;
-    ctx.ip = 0;
-    ctx.cfa = 0;
-
-    info("analyzing globals");
-    ptrdiff_t ret;
-    struct analyze_module_arg arg = { .core = core, .ctx = &ctx };
-    ret = dwfl_getmodules(dwfl, analyze_module, &arg, 0);
-    fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
-
-    info("analyzing stacks");
-    struct exec_map *exec_map = executable_maps(dwfl);
-    core->threads = unwind_stacks(dwfl, core_file, exec_map, &ctx);
-    free(exec_map);
-
-    dwfl_end(dwfl);
-
-    return core;
-}
-
 void free_core(struct core_contents *core)
 {
     struct data_map *m, *mx;
@@ -898,6 +287,70 @@ void print_core(struct core_contents *core)
         }
         printf("\n");
     }
+}
+
+struct core_contents* analyze_core(const char *exe_file, const char *core_file)
+{
+    Dwfl_Callbacks dwcb = {
+        .find_elf = find_elf_core,
+        .find_debuginfo = dwfl_build_id_find_debuginfo,
+        .section_address = dwfl_offline_section_address
+    };
+
+    struct core_contents *core = xalloc(sizeof(*core));
+    struct expr_context ctx;
+    static bool libelf_initialized = false;
+
+    if (!libelf_initialized)
+    {
+        if (elf_version(EV_CURRENT) == EV_NONE)
+            fail("elf_version");
+        libelf_initialized = true;
+    }
+
+    int fd = open(core_file, O_RDONLY);
+    if (fd < 0)
+        fail("open");
+
+    /* TODO: shall we release the Elf handle ourselves? */
+    Elf *e = elf_begin(fd, ELF_C_READ, NULL);
+    fail_if(e == NULL, "elf_begin");
+    fail_if(elf_kind(e) != ELF_K_ELF, "elf_kind");
+
+    Dwfl *dwfl = dwfl_begin(&dwcb);
+
+    executable_file = exe_file;
+
+    if (dwfl_core_file_report(dwfl, e) == -1)
+        fail("dwfl_core_file_report");
+
+    if (dwfl_report_end(dwfl, NULL, NULL) != 0)
+        fail("dwfl_report_end");
+
+    info("analyzing data segment mappings");
+    core->maps = read_maps(e);
+
+    ctx.maps = core->maps;
+    /* XXX is fd owned by libdw? do we need to copy it? */
+    ctx.core_fd = fd;
+    ctx.curs = NULL;
+    ctx.ip = 0;
+    ctx.cfa = 0;
+
+    info("analyzing globals");
+    ptrdiff_t ret;
+    struct analyze_module_arg arg = { .core = core, .ctx = &ctx };
+    ret = dwfl_getmodules(dwfl, analyze_module, &arg, 0);
+    fail_if(ret != 0, "dwfl_getmodules returned %td", ret);
+
+    info("analyzing stacks");
+    struct exec_map *exec_map = executable_maps(dwfl);
+    core->threads = unwind_stacks(dwfl, core_file, exec_map, &ctx);
+    free(exec_map);
+
+    dwfl_end(dwfl);
+
+    return core;
 }
 
 int main(int argc, char *argv[])

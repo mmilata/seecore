@@ -1,4 +1,5 @@
 #include <libunwind-coredump.h>
+#include <elfutils/libdwfl.h>
 
 struct location
 {
@@ -94,6 +95,7 @@ struct expr_context
             (tail) = (tail)->next;           \
     } while(0)
 
+/* util.c */
 void fail(const char *fmt, ...);
 void fail_if(int p, const char *fmt, ...);
 char* xsprintf(const char *fmt, ...);
@@ -103,7 +105,22 @@ void* xalloc(size_t size);
 extern int message_level;
 void message(int level, const char *fmt, ...);
 
-unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t expr_len, struct expr_context *ctx, size_t data_len);
+/* evaluator.c */
+unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t expr_len,
+                                 struct expr_context *ctx, size_t data_len);
+
+/* variable.c */
+void analyze_name_location(Dwarf_Die *die, Dwarf_Files *files, char **name,
+                           struct location* loc);
+struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
+                                 struct expr_context *ctx, bool params);
+void free_variables(struct variable *v);
+
+/* stack.c */
+bool supported_language(Dwarf_Die *cu);
+struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
+                             struct exec_map *em,
+                             struct expr_context *ctx);
 
 #define warn(...)  message(1, __VA_ARGS__)
 #define info(...)  message(2, __VA_ARGS__)
