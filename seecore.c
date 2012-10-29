@@ -232,7 +232,7 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
                  * anyway */
                 warn("cannot get location for variable %s (ip: %lx), %s", var->name, ctx->ip, dwarf_errmsg(-1));
             else if (ret == 0)
-                debug("no location available for variable %s (ip: %lx)");
+                debug("no location available for variable %s (ip: %lx)", var->name, ctx->ip);
             else
                 fail("unreachable reached");
             return var;
