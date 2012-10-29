@@ -218,7 +218,31 @@ static struct variable* analyze_variable(Dwarf_Die *die, Dwarf_Files *files,
         analyze_type(&type_die, &(var->type));
     }
 
-    if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
+    if (dwarf_attr_integrate(die, DW_AT_const_value, &at) != NULL)
+    {
+        Dwarf_Word w;
+        Dwarf_Block bl;
+        unsigned int form = dwarf_whatform(&at);
+        debug("variable %s has constant value of form %x", var->name, form);
+
+        if (dwarf_formudata(&at, &w) == 0)
+        {
+            fail_if(sizeof(w) < var->type.width, "constant value too small");
+            var->value = xalloc(var->type.width);
+            memcpy(var->value, &w, var->type.width);
+        }
+        else if (dwarf_formblock(&at, &bl) == 0)
+        {
+            fail_if(bl.length < var->type.width, "constant value too small");
+            var->value = xalloc(var->type.width);
+            memcpy(var->value, bl.data, var->type.width);
+        }
+        else
+        {
+            warn("unable to get constant value of variable %x (form %x)", var->name, form);
+        }
+    }
+    else if (dwarf_attr_integrate(die, DW_AT_location, &at) != NULL)
     {
         size_t exprlen;
         Dwarf_Op *expr;
