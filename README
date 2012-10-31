@@ -1,0 +1,64 @@
+LINUX CORE DUMP INFORMATION EXTRACTION TOOL
+===========================================
+
+
+PURPOSE
+
+This package aims to provide easy access to the following data usually
+available in a core dump:
+
+ - Global variables (symbols & values).
+ - Stacks of individual threads.
+ - Local variables for each stack frame.
+ - Mappings from virtual memory to file offsets in the core.
+
+It has small subset of features of an actual debugger, but is somewhat more
+lightweight and easier to use from another program.
+
+
+USAGE
+
+ - Data structures and functions are documented in the "seecore.h" header file.
+ - Simple example that prints most of the extracted information is provided as
+   "seecore.c" source file.
+ - Compile together with your project or use in any way you consider best,
+   there is no shared library as the disadvantages and work required outweighs
+   the benefits.
+ - There are two dependencies: elfutils [0] (any recent version) and
+   libunwind [1] (at least version 1.1).
+
+
+LIMITATIONS AND KNOWN BUGS
+
+ - The support of DWARF primitives is far from complete as opposed to a REAL
+   debugger, features are added as I stumble upon them. Let me know if you want
+   to see something implemented (especially the DW_OP_foo operations, "unknown
+   opcode").
+ - Only C language is supported (compilation units in other language are
+   skipped).
+ - Only x86-64 architecture is supported, though adding support for another
+   shouldn't be difficult. This (probably) applies both to the hosting computer
+   as well as the computer that produced the core dump.
+ - Shared libraries and external debugging information are searched for in
+   standard places (and you have to have both, in the version that was used in
+   the program that resulted in the core dump). This pretty much means that you
+   can analyze only coredumps produced on your own system with no library
+   upgrades in between. Again, this should not be difficult to change, as long
+   as you have another way of supplying the right libraries and debuginfos
+   needed.
+
+
+LICENSE
+
+All code is released under the WTFPL license, see LICENSE for the full text.
+
+
+AUTHOR
+
+Martin Milata, xmilata at fi muni cz
+
+
+REFERENCES
+
+[0] http://fedorahosted.org/elfutils/
+[1] http://www.nongnu.org/libunwind/
