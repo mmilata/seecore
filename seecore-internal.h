@@ -56,7 +56,6 @@ char* xsprintf(const char *fmt, ...);
 char* xstrdup(const char *s);
 void* xalloc(size_t size);
 
-extern int message_level;
 void message(int level, const char *fmt, ...);
 
 /* evaluator.c */

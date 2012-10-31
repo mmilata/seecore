@@ -7,6 +7,8 @@
 #ifndef SEECORE_H
 #define SEECORE_H
 
+#include <stdint.h>
+
 struct type
 {
     char*    name;  /* useless for anything except human consumption */
@@ -62,6 +64,10 @@ struct core_contents
     struct thread*   threads;
     struct data_map* maps;
 };
+
+/* Debugging message verbosity
+ * 0 = nothing, 1 = warn, 2 = info, 3 = debug */
+extern int seecore_message_level;
 
 struct core_contents* analyze_core(const char *exe_file, const char *core_file);
 void print_core(struct core_contents *core);

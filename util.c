@@ -11,13 +11,13 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
-int message_level = 0;
+int seecore_message_level = 0;
 
 void message(int level, const char *fmt, ...)
 {
     va_list ap;
 
-    if (level > message_level)
+    if (level > seecore_message_level)
         return;
 
     va_start(ap, fmt);
