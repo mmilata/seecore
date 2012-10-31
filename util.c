@@ -1,3 +1,9 @@
+/*
+ * Written by Martin Milata in 2012.
+ * Published under WTFPL, see LICENSE.
+ *
+ */
+
 #define _GNU_SOURCE /* needed for asprintf */
 
 #include <stdio.h>

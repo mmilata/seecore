@@ -1,3 +1,9 @@
+/*
+ * Written by Martin Milata in 2012.
+ * Published under WTFPL, see LICENSE.
+ *
+ */
+
 #ifndef SEECORE_INTERNAL_H
 #define SEECORE_INTERNAL_H
 

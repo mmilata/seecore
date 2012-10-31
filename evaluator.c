@@ -1,3 +1,9 @@
+/*
+ * Written by Martin Milata in 2012.
+ * Published under WTFPL, see LICENSE.
+ *
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
