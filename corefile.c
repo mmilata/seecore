@@ -23,14 +23,6 @@
  * callback? */
 const char *executable_file = NULL;
 
-/* TODO: remove this */
-static void errors(void)
-{
-    int d = dwarf_errno();
-    int dw = dwfl_errno();
-    debug("dwarf: [%d]%s dwfl: [%d]%s", d, dwarf_errmsg(d), dw, dwfl_errmsg(dw));
-}
-
 static int find_elf_core (Dwfl_Module *mod, void **userdata,
                           const char *modname, Dwarf_Addr base,
                           char **file_name, Elf **elfp)
@@ -87,12 +79,19 @@ static int analyze_module(Dwfl_Module *mod, void **userdata, const char *name,
 
     GElf_Addr bias;
     bool have_elf = (dwfl_module_getelf (mod, &bias) != NULL);
-    errors();
-    bool have_dwarf = (dwfl_module_getdwarf (mod, &bias) != NULL);
-    errors();
-
-    if (!have_dwarf)
+    if (!have_elf)
+    {
+        warn("Cannot locate ELF file for %s: %s", name, dwfl_errmsg(-1));
         return DWARF_CB_OK;
+    }
+
+    bool have_dwarf = (dwfl_module_getdwarf (mod, &bias) != NULL);
+    if (!have_dwarf)
+    {
+        warn("Cannot locate debugging information for %s: %s", name,
+             dwfl_errmsg(-1));
+        return DWARF_CB_OK;
+    }
 
     Dwarf_Die *die = NULL;
 
