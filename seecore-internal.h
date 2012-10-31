@@ -79,5 +79,7 @@ struct thread* unwind_stacks(Dwfl *dwfl, const char *core_file,
 #define info(...)  message(2, __VA_ARGS__)
 #define debug(...) message(3, __VA_ARGS__)
 
+/* ugly workaround */
+#define POINTER_SIZE 8
 
 #endif /* SEECORE_INTERNAL_H */

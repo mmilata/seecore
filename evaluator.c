@@ -54,7 +54,7 @@ static unsigned char* register_content(struct expr_context *ctx, int regnum, siz
     int ret;
     unw_word_t val;
 
-    fail_if(len > 8, "requested too much data from register"); /* XXX: arch-dependent */
+    fail_if(len > POINTER_SIZE, "requested too much data from register"); /* XXX: arch-dependent */
     /* Assume the libunwind register numbers are the same as DWARF register
      * numbers. We'll need a translation table/function otherwise. */
     ret = unw_get_reg(ctx->curs, regnum, &val);

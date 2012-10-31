@@ -80,7 +80,7 @@ static void analyze_type(Dwarf_Die *die, struct type *ty)
 
     case DW_TAG_array_type:
         ty->name = xsprintf("%s[]", sub_type.name);
-        ty->width = 8; /* TODO */
+        ty->width = POINTER_SIZE;
         break;
 
     case DW_TAG_structure_type:
