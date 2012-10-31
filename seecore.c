@@ -6,25 +6,46 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "seecore.h"
 
+static void print_usage_and_die(char **argv)
+{
+    fprintf(stderr, "usage: %s [-v] [-v] [-v] <binary> <core>\n", argv[0]);
+    exit(EXIT_FAILURE);
+}
+
 int main(int argc, char *argv[])
 {
-    /* TODO: investigate DW_TAG_GNU_call_site:
-     * http://gcc.gnu.org/wiki/summit2010?action=AttachFile&do=get&target=jelinek.pdf
-     * http://gcc.gnu.org/ml/gcc-patches/2010-08/txt00153.txt */
-    /* TODO: decompose structs into members   */
-    if (argc < 3)
+    int opt;
+
+    while ((opt = getopt(argc, argv, "v")) != -1)
     {
-        fprintf(stderr, "usage: %s <binary> <core>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        switch (opt)
+        {
+        case 'v':
+            seecore_message_level++;
+            break;
+        default:
+            print_usage_and_die(argv);
+            break;
+        }
     }
 
-    seecore_message_level = 2;
+    /* need exactly two positional arguments */
+    if (argc - optind != 2)
+    {
+        print_usage_and_die(argv);
+    }
 
-    struct core_contents *c = analyze_core(argv[1], argv[2]);
+    /* extract contents of the core */
+    struct core_contents *c = analyze_core(argv[optind], argv[optind+1]);
+
+    /* print it */
     print_core(c);
+
+    /* free all dynamically allocated memory */
     free_core(c);
 
     return EXIT_SUCCESS;
