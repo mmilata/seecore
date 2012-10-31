@@ -6,7 +6,7 @@
 #include <dwarf.h>
 #include <libunwind-coredump.h>
 
-#include "seecore.h"
+#include "seecore-internal.h"
 
 bool supported_language(Dwarf_Die *cu)
 {

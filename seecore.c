@@ -7,13 +7,14 @@
 #include <libelf.h>
 #include <elfutils/libdwfl.h>
 
-#include "seecore.h"
+#include "seecore-internal.h"
 
 /* Is there any other way we can pass the executable file name to the find_elf
  * callback? */
 const char *executable_file = NULL;
 
-void errors(void)
+/* TODO: remove this */
+static void errors(void)
 {
     int d = dwarf_errno();
     int dw = dwfl_errno();

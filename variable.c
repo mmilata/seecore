@@ -5,7 +5,7 @@
 #include <elfutils/libdw.h>
 #include <dwarf.h>
 
-#include "seecore.h"
+#include "seecore-internal.h"
 
 static void analyze_type(Dwarf_Die *die, struct type *ty)
 {

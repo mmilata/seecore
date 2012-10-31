@@ -6,7 +6,7 @@
 #include <dwarf.h>
 #include <elfutils/libdw.h>
 
-#include "seecore.h"
+#include "seecore-internal.h"
 
 static unsigned char* core_read(struct expr_context *ctx, Dwarf_Addr addr,
                                 size_t len)
