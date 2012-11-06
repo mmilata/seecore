@@ -229,6 +229,12 @@ void free_core(struct core_contents *core)
 
 static void print_var(struct variable *var, unsigned indent)
 {
+    /* skip variables prefixed with underscore */
+    if (var->name[0] == '_')
+    {
+        return;
+    }
+
     unsigned i;
     for (i = 0; i < indent; i++)
         printf("\t");

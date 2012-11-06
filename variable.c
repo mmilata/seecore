@@ -263,13 +263,6 @@ struct variable* child_variables(Dwarf_Die *parent, Dwarf_Files *files,
             if (!var)
                 continue;
 
-            /* XXX */
-            if (var->name && var->name[0] == '_')
-            {
-                free_variables(var);
-                continue;
-            }
-
             list_append(head, tail, var);
         }
     } while (dwarf_siblingof(&die, &die) == 0);
