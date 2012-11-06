@@ -20,7 +20,7 @@ USAGE
 
  - Data structures and functions are documented in the "seecore.h" header file.
  - Simple example that prints most of the extracted information is provided as
-   "seecore.c" source file.
+   "seecore.c" source file. It accepts -v arguments to increase its verbosity.
  - Compile together with your project or use in any way you consider best,
    there is no shared library as the disadvantages and work required outweighs
    the benefits.
