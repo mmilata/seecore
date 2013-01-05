@@ -165,8 +165,12 @@ static struct frame* unwind_thread(Dwfl *dwfl, unw_addr_space_t as,
 
         unw_word_t off;
         char funcname[10*1024];
+        funcname[0] = '\0';
         ret = unw_get_proc_name(&c, funcname, sizeof(funcname)-1, &off);
-        fail_if(ret < 0, "unw_get_proc_name for IP %lx", (unsigned long)ip);
+        if (ret < 0)
+        {
+            warn("unw_get_proc_name failed for IP %lx", (unsigned long)ip);
+        }
         info("\t%llx %s", (unsigned long long)ip, funcname);
 
         /* According to spec[1], CFA is RSP of the previous frame. However,
