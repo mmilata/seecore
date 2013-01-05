@@ -144,7 +144,7 @@ unsigned char* evaluate_loc_expr(Dwarf_Op *expr, size_t exprlen,
         default:
             /* TODO: implement the rest */
             /* priority: DW_OP_stack_value */
-            fail("unknown opcode %x", o->atom);
+            warn("unknown opcode %x", o->atom);
             return NULL;
             break;
         }
